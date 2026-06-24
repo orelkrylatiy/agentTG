@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  telegram-ai-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-ai-agent
+    restart: unless-stopped
+    volumes:
+      # Persist session and database
+      - ./data:/app/data
+      # Mount .env file
+      - ./.env:/app/.env:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Optional: set timezone
+    # - TZ=Europe/Moscow
+    networks:
+      - agent-network
+
+networks:
+  agent-network:
+    driver: bridge
