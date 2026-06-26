@@ -181,15 +181,11 @@ class LLMClient:
 
         elif provider == LLMProvider.OPENAI:
             config["model"] = self.settings.openai_fallback_model
-            config["temperature"] = 0.15
-            config["top_p"] = 0.7
-            config["max_tokens"] = 600
+            config["temperature"] = 0.2
+            config["top_p"] = 0.8
+            config["max_tokens"] = 120
             if self.settings.openai_api_base:
                 config["api_base"] = self.settings.openai_api_base
-            # This model ignores enable_thinking=False — it always reasons.
-            # With True, reasoning goes to reasoning_content (clean separation).
-            # max_tokens=600: ~440 for reasoning + ~120 for actual reply.
-            config["extra_body"] = {"enable_thinking": True}
 
         elif provider == LLMProvider.OPENROUTER:
             config["model"] = self.settings.openrouter_fallback_model
