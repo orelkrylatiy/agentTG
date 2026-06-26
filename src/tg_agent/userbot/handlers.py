@@ -104,8 +104,14 @@ class IncomingMessageHandler:
             logger.debug(f"Skipping control bot chat/message")
             return
 
-        # In group/supergroup chats only respond if mentioned or replied to
+        # Skip messages from broadcast channels (can't reply there anyway)
         from telethon.tl.types import Chat, Channel
+        _sender_obj = getattr(event, "sender", None)
+        if isinstance(_sender_obj, Channel) and not getattr(_sender_obj, "megagroup", False):
+            logger.debug(f"Skipping broadcast channel message from {sender_id}")
+            return
+
+        # In group/supergroup chats only respond if mentioned or replied to
         _chat_obj = getattr(event, "chat", None)
         is_group = isinstance(_chat_obj, (Chat, Channel)) and getattr(_chat_obj, "megagroup", False) or isinstance(_chat_obj, Chat)
         if is_group:
