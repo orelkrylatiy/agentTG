@@ -9,6 +9,7 @@ from telethon.tl.types import Message
 
 from tg_agent.agent.llm import LLMClient
 from tg_agent.agent.prompts import PromptManager
+from tg_agent.agent.sanitizer import clean_reply
 from tg_agent.config import Settings
 from tg_agent.logging import get_logger
 
@@ -99,8 +100,16 @@ class ReplyGenerator:
                 context_used=len(context_messages or []),
             )
 
+        dialog_started = bool(context_turns)
+        cleaned = clean_reply(llm_response.content, dialog_started, message_text)
+        if not cleaned:
+            logger.warning(f"Sanitizer emptied reply, using original: {llm_response.content!r}")
+            cleaned = llm_response.content
+        if cleaned != llm_response.content:
+            logger.info(f"Sanitizer: {llm_response.content!r} → {cleaned!r}")
+
         return GeneratedReply(
-            text=llm_response.content,
+            text=cleaned,
             success=True,
             context_used=len(context_messages or []),
         )

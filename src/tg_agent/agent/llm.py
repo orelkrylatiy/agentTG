@@ -181,14 +181,12 @@ class LLMClient:
 
         elif provider == LLMProvider.OPENAI:
             config["model"] = self.settings.openai_fallback_model
-            config["temperature"] = 0.25
+            config["temperature"] = 0.15
+            config["top_p"] = 0.7
             config["max_tokens"] = 600
             if self.settings.openai_api_base:
                 config["api_base"] = self.settings.openai_api_base
-            # enable_thinking=True: thinking goes to reasoning_content (clean separation),
-            # content holds only the reply. enable_thinking=False is ignored by qwen3 —
-            # it writes reasoning as plain text and fills up max_tokens before the reply.
-            config["extra_body"] = {"enable_thinking": True}
+            config["extra_body"] = {"enable_thinking": False}
 
         elif provider == LLMProvider.OPENROUTER:
             config["model"] = self.settings.openrouter_fallback_model
@@ -220,14 +218,17 @@ class LLMClient:
         # Build full message list with system prompt.
         # Prepend /no_think to the first user message — qwen3-specific token
         # that disables the internal thinking phase for that turn.
-        patched = []
-        first_user_patched = False
-        for msg in messages:
-            if msg["role"] == "user" and not first_user_patched:
-                patched.append({**msg, "content": "/no_think\n" + msg["content"]})
-                first_user_patched = True
-            else:
-                patched.append(msg)
+        # Patch /no_think into first AND last user messages
+        patched = list(messages)
+        first_idx = next((i for i, m in enumerate(patched) if m["role"] == "user"), None)
+        last_idx = next((i for i, m in enumerate(reversed(patched)) if m["role"] == "user"), None)
+        if last_idx is not None:
+            last_idx = len(patched) - 1 - last_idx
+        for idx in {first_idx, last_idx}:
+            if idx is not None:
+                m = patched[idx]
+                if not m["content"].startswith("/no_think"):
+                    patched[idx] = {**m, "content": "/no_think\n" + m["content"]}
 
         full_messages = [
             {"role": "system", "content": system_prompt},
@@ -306,6 +307,14 @@ class LLMClient:
                 response = await _asyncio.wait_for(coro, timeout=90.0)
             else:
                 response = completion_result
+
+            # Log token breakdown
+            usage = getattr(response, "usage", None)
+            if usage:
+                total = getattr(usage, "completion_tokens", "?")
+                details = getattr(usage, "completion_tokens_details", None)
+                reasoning = getattr(details, "reasoning_tokens", 0) if details else 0
+                logger.info(f"Tokens: reasoning={reasoning}, completion={total}")
 
             content = response.choices[0].message.content
 
