@@ -2,6 +2,8 @@
 Incoming message handlers for Telethon userbot.
 """
 
+import asyncio
+from collections import defaultdict
 
 from telethon import TelegramClient, events
 from telethon.tl.types import Message
@@ -68,6 +70,11 @@ class IncomingMessageHandler:
 
         self.owner_id = settings.owner_telegram_id
 
+        # Debounce: accumulate messages per chat, reply once after 3s silence
+        self._pending: dict[int, list] = defaultdict(list)
+        self._timers: dict[int, asyncio.Task] = {}
+        self._debounce_seconds = 3.0
+
     def register_handlers(self) -> None:
         """Register event handlers with the client."""
         self.client.add_event_handler(
@@ -78,53 +85,73 @@ class IncomingMessageHandler:
 
     async def _on_new_message(self, event: events.NewMessage) -> None:
         try:
-            await self._handle_message(event)
+            await self._filter_and_enqueue(event)
         except Exception as e:
             logger.exception(f"Unhandled error in message handler: {e}")
 
-    async def _handle_message(self, event: events.NewMessage) -> None:
+    async def _filter_and_enqueue(self, event: events.NewMessage) -> None:
+        """Run early filters, then debounce-enqueue the event."""
         message = event.message
         chat_id = event.chat_id
         sender_id = event.sender_id
 
-        logger.debug(f"Event: chat={chat_id} sender={sender_id} out={message.out}")
-
-        # Skip messages from self
         if message.out:
             return
-
-        # Skip messages from bots
         if event.sender and getattr(event.sender, "bot", False):
-            logger.debug(f"Skipping bot message from {sender_id}")
             return
 
-        # Skip the control bot's own chat
         control_bot_id = int(self.settings.control_bot_token.split(":")[0])
         if chat_id == control_bot_id or sender_id == control_bot_id:
-            logger.debug(f"Skipping control bot chat/message")
             return
 
-        # Skip messages from broadcast channels (can't reply there anyway)
         from telethon.tl.types import Chat, Channel
         _sender_obj = getattr(event, "sender", None)
         if isinstance(_sender_obj, Channel) and not getattr(_sender_obj, "megagroup", False):
-            logger.debug(f"Skipping broadcast channel message from {sender_id}")
             return
 
-        # In group/supergroup chats only respond if mentioned or replied to
         _chat_obj = getattr(event, "chat", None)
-        is_group = isinstance(_chat_obj, (Chat, Channel)) and getattr(_chat_obj, "megagroup", False) or isinstance(_chat_obj, Chat)
+        is_group = (
+            isinstance(_chat_obj, (Chat, Channel)) and getattr(_chat_obj, "megagroup", False)
+            or isinstance(_chat_obj, Chat)
+        )
         if is_group:
             me = await event.client.get_me()
-            mentioned = message.mentioned  # Telegram sets this when @username is in text
+            mentioned = message.mentioned
             reply_to_self = (
                 message.reply_to
                 and hasattr(message.reply_to, "reply_to_msg_id")
                 and await self._is_reply_to_self(event, me.id)
             )
             if not mentioned and not reply_to_self:
-                logger.debug(f"Group message without mention/reply, skipping")
                 return
+
+        # Passed all filters — debounce
+        self._pending[chat_id].append(event)
+        if chat_id in self._timers:
+            self._timers[chat_id].cancel()
+        self._timers[chat_id] = asyncio.create_task(
+            self._flush_after_delay(chat_id)
+        )
+
+    async def _flush_after_delay(self, chat_id: int) -> None:
+        await asyncio.sleep(self._debounce_seconds)
+        events_batch = self._pending.pop(chat_id, [])
+        self._timers.pop(chat_id, None)
+        if not events_batch:
+            return
+        # Use the last event as the canonical one; combine all texts
+        last_event = events_batch[-1]
+        if len(events_batch) > 1:
+            combined = "\n".join(
+                e.message.text for e in events_batch if e.message.text
+            )
+            last_event.message.message = combined  # patch text for processing
+        await self._handle_message(last_event)
+
+    async def _handle_message(self, event: events.NewMessage) -> None:
+        message = event.message
+        chat_id = event.chat_id
+        sender_id = event.sender_id
 
         logger.info(f"New message in chat {chat_id} from {sender_id}")
 
