@@ -48,6 +48,15 @@ class UserbotClient:
         session_dir = session_path.parent
         session_dir.mkdir(parents=True, exist_ok=True)
 
+        # Enable WAL mode to prevent "database is locked" on concurrent access
+        import sqlite3 as _sqlite3
+        try:
+            _con = _sqlite3.connect(str(session_path))
+            _con.execute("PRAGMA journal_mode=WAL")
+            _con.close()
+        except Exception:
+            pass
+
         # Create client
         client = TelegramClient(
             str(session_path),
