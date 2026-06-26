@@ -182,10 +182,13 @@ class LLMClient:
         elif provider == LLMProvider.OPENAI:
             config["model"] = self.settings.openai_fallback_model
             config["temperature"] = 0.25
-            config["max_tokens"] = 120
+            config["max_tokens"] = 600
             if self.settings.openai_api_base:
                 config["api_base"] = self.settings.openai_api_base
-            config["extra_body"] = {"enable_thinking": False}
+            # enable_thinking=True: thinking goes to reasoning_content (clean separation),
+            # content holds only the reply. enable_thinking=False is ignored by qwen3 —
+            # it writes reasoning as plain text and fills up max_tokens before the reply.
+            config["extra_body"] = {"enable_thinking": True}
 
         elif provider == LLMProvider.OPENROUTER:
             config["model"] = self.settings.openrouter_fallback_model
@@ -313,7 +316,7 @@ class LLMClient:
 
             import re as _re
             raw_content = content
-            logger.debug(f"Raw LLM content: {raw_content!r}")
+            logger.info(f"Raw LLM content: {raw_content!r}")
 
             # With enable_thinking=True, reasoning goes to reasoning_content and
             # content holds only the clean reply — just strip whitespace.
@@ -460,12 +463,9 @@ class LLMClient:
             "openrouter_configured": bool(self.settings.openrouter_api_key),
         }
 
-    async def smoke_test(
-        self,
-        prompt: str = "Reply with exactly: CHATGPT_OAUTH_OK",
-    ) -> LLMResponse:
+    async def smoke_test(self) -> LLMResponse:
         """Run a minimal provider smoke test."""
         return await self.generate_reply(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt="You are a terse connectivity test.",
+            messages=[{"role": "user", "content": "привет"}],
+            system_prompt="Отвечай одним словом.",
         )

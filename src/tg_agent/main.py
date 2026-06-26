@@ -120,7 +120,7 @@ class Agent:
 
         # LLM health check
         logger.info("Checking LLM connectivity...")
-        llm_test = await self.llm_client.smoke_test("ping")
+        llm_test = await self.llm_client.smoke_test()
         if llm_test.success:
             logger.info(f"LLM OK — {llm_test.provider.value} / {llm_test.model}")
         else:
