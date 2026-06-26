@@ -157,6 +157,11 @@ class ReplyGenerator:
                 merged[-1]["content"] += "\n" + turn["content"]
             else:
                 merged.append(dict(turn))
+
+        # Drop leading assistant messages — LM Studio requires first message to be user
+        while merged and merged[0]["role"] == "assistant":
+            merged.pop(0)
+
         return merged
 
     def _build_context(self, messages: list[Message]) -> str:
