@@ -217,13 +217,22 @@ class LLMClient:
         Returns:
             LLMResponse with generated content.
         """
-        # Build full message list with system prompt
+        # Build full message list with system prompt.
+        # Prepend /no_think to the first user message — qwen3-specific token
+        # that disables the internal thinking phase for that turn.
+        patched = []
+        first_user_patched = False
+        for msg in messages:
+            if msg["role"] == "user" and not first_user_patched:
+                patched.append({**msg, "content": "/no_think\n" + msg["content"]})
+                first_user_patched = True
+            else:
+                patched.append(msg)
+
         full_messages = [
             {"role": "system", "content": system_prompt},
-            *messages,
+            *patched,
         ]
-
-        # /no_think causes confusion in qwen3 output — handled via enable_thinking:false instead
 
         # Try primary provider first
         providers_to_try = [self.primary_provider] + self.fallback_chain
