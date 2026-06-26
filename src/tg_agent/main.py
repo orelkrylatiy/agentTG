@@ -118,6 +118,14 @@ class Agent:
         )
         channel_handler.register_handlers()
 
+        # LLM health check
+        logger.info("Checking LLM connectivity...")
+        llm_test = await self.llm_client.smoke_test("ping")
+        if llm_test.success:
+            logger.info(f"LLM OK — {llm_test.provider.value} / {llm_test.model}")
+        else:
+            logger.warning(f"LLM UNAVAILABLE — {llm_test.error_message}. Agent will start but replies will fail until LLM is up.")
+
         logger.info("All components initialized successfully")
 
     async def run(self) -> None:
