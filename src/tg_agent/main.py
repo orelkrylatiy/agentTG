@@ -114,6 +114,7 @@ class Agent:
             settings=self.settings,
             client=self.userbot.client,
             control_bot=self.control_bot,
+            llm_client=self.llm_client,
         )
         channel_handler.register_handlers()
 
