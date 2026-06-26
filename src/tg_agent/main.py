@@ -15,6 +15,7 @@ from tg_agent.control_bot.handlers import setup_control_handlers
 from tg_agent.logging import get_logger, setup_logging
 from tg_agent.storage.db import get_db
 from tg_agent.userbot import UserbotClient
+from tg_agent.userbot.channel_handler import ChannelHandler
 from tg_agent.userbot.handlers import setup_incoming_handlers
 
 logger = get_logger(__name__)
@@ -74,6 +75,7 @@ class Agent:
             settings=self.settings,
             db=self.db,
             control_bot=self.control_bot,
+            userbot_client=self.userbot.client,
         )
 
         # Initialize userbot
@@ -106,6 +108,14 @@ class Agent:
             control_bot=self.control_bot,
             llm_client=self.llm_client,
         )
+
+        # Setup channel monitoring
+        channel_handler = ChannelHandler(
+            settings=self.settings,
+            client=self.userbot.client,
+            control_bot=self.control_bot,
+        )
+        channel_handler.register_handlers()
 
         logger.info("All components initialized successfully")
 

@@ -130,69 +130,49 @@ class IncomingMessageHandler:
             logger.info(
                 f"Policy decision for chat {chat_id}: {decision.action} - {decision.reason}"
             )
+            # Extract needed fields before session closes
+            chat_id_val = chat_settings.chat_id
+            chat_title_val = chat_settings.chat_title
 
         if decision.action == "ignore":
             return
 
         if decision.action == "notify":
-            await self._handle_watch_mode(message, chat_settings, sender_id)
+            await self._handle_watch_mode(message, chat_id_val, chat_title_val, sender_id)
         elif decision.action == "draft":
-            await self._handle_draft_mode(message, chat_settings, sender_id)
+            await self._handle_draft_mode(message, chat_id_val, chat_title_val, sender_id)
         elif decision.action == "auto_reply":
-            await self._handle_auto_reply(message, chat_settings)
+            await self._handle_auto_reply(message, chat_id_val)
 
     async def _handle_watch_mode(
         self,
         message: Message,
-        chat_settings,
+        chat_id: int,
+        chat_title: str | None,
         sender_id: int | None,
     ) -> None:
-        """
-        Handle WATCH mode - notify owner without replying.
-
-        Args:
-            message: Incoming message.
-            chat_settings: Chat settings.
-            sender_id: Sender ID.
-        """
-        # Generate summary
         summary = await self.reply_generator.generate_summary(
             message_text=message.text or "",
             sender_name=str(sender_id) if sender_id else None,
         )
-
-        # Notify owner via control bot
         await self.control_bot.notify_watch_message(
-            chat_id=chat_settings.chat_id,
-            chat_title=chat_settings.chat_title or f"Chat {chat_settings.chat_id}",
+            chat_id=chat_id,
+            chat_title=chat_title or f"Chat {chat_id}",
             sender_id=sender_id,
             message_text=message.text or "",
             summary=summary,
         )
-
-        logger.info(f"Sent WATCH notification for chat {chat_settings.chat_id}")
+        logger.info(f"Sent WATCH notification for chat {chat_id}")
 
     async def _handle_draft_mode(
         self,
         message: Message,
-        chat_settings,
+        chat_id: int,
+        chat_title: str | None,
         sender_id: int | None,
     ) -> None:
-        """
-        Handle DRAFT mode - generate reply for approval.
+        context_messages = await self._get_context_messages(chat_id, message.id)
 
-        Args:
-            message: Incoming message.
-            chat_settings: Chat settings.
-            pending_action_repo: Repository for pending actions.
-            sender_id: Sender ID.
-        """
-        # Get context messages
-        context_messages = await self._get_context_messages(
-            chat_settings.chat_id, message.id
-        )
-
-        # Generate reply
         reply_result = await self.reply_generator.generate(
             incoming_message=message,
             context_messages=context_messages,
@@ -200,49 +180,35 @@ class IncomingMessageHandler:
 
         if not reply_result.success:
             logger.warning(f"Reply generation failed: {reply_result.error_message}")
-            # Still create a draft with error message
             reply_text = reply_result.text or "[Failed to generate reply]"
         else:
             reply_text = reply_result.text
 
-        # Create pending action
         with self.db.get_sync_session() as session:
             action = PendingActionRepo(session).create(
                 action_type="reply",
-                chat_id=chat_settings.chat_id,
+                chat_id=chat_id,
                 text=reply_text,
                 reply_to_message_id=message.id,
             )
+            action_id = action.id
 
-        # Send to owner for approval via control bot
         await self.control_bot.send_draft_for_approval(
-            pending_action_id=action.id,
-            chat_id=chat_settings.chat_id,
-            chat_title=chat_settings.chat_title or f"Chat {chat_settings.chat_id}",
+            pending_action_id=action_id,
+            chat_id=chat_id,
+            chat_title=chat_title or f"Chat {chat_id}",
             original_message=message.text or "",
             sender_id=sender_id,
             reply_text=reply_text,
         )
-
-        logger.info(f"Created draft action {action.id} for chat {chat_settings.chat_id}")
+        logger.info(f"Created draft action {action_id} for chat {chat_id}")
 
     async def _handle_auto_reply(
         self,
         message: Message,
-        chat_settings,
+        chat_id: int,
     ) -> None:
-        """
-        Handle AUTO mode - reply automatically.
-
-        Args:
-            message: Incoming message.
-            chat_settings: Chat settings.
-            pending_action_repo: Repository for pending actions.
-        """
-        # Get context messages
-        context_messages = await self._get_context_messages(
-            chat_settings.chat_id, message.id
-        )
+        context_messages = await self._get_context_messages(chat_id, message.id)
 
         # Generate reply
         reply_result = await self.reply_generator.generate(
@@ -254,32 +220,26 @@ class IncomingMessageHandler:
             logger.error(f"Auto-reply generation failed: {reply_result.error_message}")
             return
 
-        # Send reply
         sent_message = await self.sender.send_reply(
-            chat_id=chat_settings.chat_id,
+            chat_id=chat_id,
             text=reply_result.text,
             reply_to_message_id=message.id,
             simulate_typing=True,
         )
 
         if sent_message:
-            # Log the sent message
             with self.db.get_sync_session() as session:
-                message_log_repo = MessageLogRepo(session)
-                message_log_repo.create(
-                    chat_id=chat_settings.chat_id,
+                MessageLogRepo(session).create(
+                    chat_id=chat_id,
                     message_id=sent_message.id,
                     sender_id=self.owner_id,
                     direction=MessageDirection.AGENT_SENT,
                     text=reply_result.text,
                 )
+                self.cooldown_manager.record_reply(chat_id)
+                ChatSettingsRepo(session).update_last_agent_reply(chat_id)
 
-                # Update cooldown
-                self.cooldown_manager.record_reply(chat_settings.chat_id)
-                chat_settings_repo = ChatSettingsRepo(session)
-                chat_settings_repo.update_last_agent_reply(chat_settings.chat_id)
-
-            logger.info(f"Auto-reply sent to chat {chat_settings.chat_id}")
+            logger.info(f"Auto-reply sent to chat {chat_id}")
 
     async def _get_context_messages(
         self,

@@ -5,6 +5,7 @@ aiogram control bot for agent management.
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 
 from tg_agent.config import Settings
 from tg_agent.logging import get_logger
@@ -56,9 +57,24 @@ class ControlBot:
         """Start the control bot."""
         logger.info("Starting control bot...")
 
-        # Get bot info
         bot_me = await self.bot.get_me()
         logger.info(f"Control bot started as @{bot_me.username} (ID: {bot_me.id})")
+
+        await self.bot.set_my_commands([
+            BotCommand(command="start",   description="Запустить бота"),
+            BotCommand(command="status",  description="Статус агента"),
+            BotCommand(command="pause",   description="Приостановить агента"),
+            BotCommand(command="resume",  description="Возобновить агента"),
+            BotCommand(command="chats",   description="Список активных чатов"),
+            BotCommand(command="mode",    description="Режим чата (watch/draft/auto)"),
+            BotCommand(command="trust",   description="Добавить доверенный чат"),
+            BotCommand(command="untrust", description="Убрать доверенный чат"),
+            BotCommand(command="send",    description="Отправить сообщение вручную"),
+            BotCommand(command="recent",  description="Последние сообщения"),
+            BotCommand(command="style",        description="Стиль ответов"),
+            BotCommand(command="scan_channel", description="Последние посты из каналов"),
+            BotCommand(command="help",         description="Помощь"),
+        ])
 
     async def stop(self) -> None:
         """Stop the control bot."""

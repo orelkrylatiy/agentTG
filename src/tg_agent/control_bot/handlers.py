@@ -2,6 +2,7 @@
 
 from aiogram import F, Dispatcher, Router, types
 from aiogram.filters import Command, CommandObject, CommandStart
+from telethon import TelegramClient
 
 from tg_agent.config import Settings
 from tg_agent.control_bot import ControlBot
@@ -27,6 +28,7 @@ def setup_control_handlers(
     settings: Settings,
     db: Database,
     control_bot: ControlBot,
+    userbot_client: TelegramClient | None = None,
 ) -> None:
     """
     Set up all control bot command handlers.
@@ -99,6 +101,13 @@ def setup_control_handlers(
     @router.message(Command("help"))
     async def help_handler(message: types.Message) -> None:
         await cmd_help(message)
+
+    @router.message(Command("scan_channel"))
+    async def scan_channel_handler(
+        message: types.Message,
+        command: CommandObject | None = None,
+    ) -> None:
+        await cmd_scan_channel(message, settings, control_bot, userbot_client, _command_args(command))
 
     dp.include_router(router)
 
@@ -400,6 +409,58 @@ async def cmd_style(message: types.Message, settings: Settings) -> None:
     await message.answer(text, parse_mode="HTML")
 
 
+async def cmd_scan_channel(
+    message: types.Message,
+    settings: Settings,
+    control_bot: ControlBot,
+    client: TelegramClient | None,
+    args: str,
+) -> None:
+    """Handle /scan_channel [limit] — fetch recent posts from monitored channels."""
+    if not client:
+        await message.answer("❌ Userbot client not available.")
+        return
+
+    channel_ids = settings.monitored_channel_ids
+    if not channel_ids:
+        await message.answer("❌ No channels configured in MONITORED_CHANNELS.")
+        return
+
+    try:
+        limit = max(1, min(int(args), 50)) if args.isdigit() else 10
+    except Exception:
+        limit = 10
+
+    await message.answer(f"🔍 Scanning {len(channel_ids)} channel(s), last {limit} posts...")
+
+    total = 0
+    for channel_id in channel_ids:
+        try:
+            msgs = await client.get_messages(channel_id, limit=limit)
+            chat = await client.get_entity(channel_id)
+            title = getattr(chat, "title", f"Channel {channel_id}")
+
+            for msg in reversed(msgs):
+                if not msg.text:
+                    continue
+                text = (
+                    f"📢 <b>{title}</b> (история)\n\n"
+                    f"{msg.text[:1000]}"
+                )
+                if len(msg.text) > 1000:
+                    text += "\n\n<i>... (обрезано)</i>"
+                await control_bot.send_message(
+                    chat_id=settings.owner_telegram_id,
+                    text=text,
+                    parse_mode="HTML",
+                )
+                total += 1
+        except Exception as e:
+            await message.answer(f"❌ Error scanning {channel_id}: {e}")
+
+    await message.answer(f"✅ Готово — переслано {total} постов.")
+
+
 async def cmd_help(message: types.Message) -> None:
     """Handle /help command."""
     text = (
@@ -416,6 +477,8 @@ async def cmd_help(message: types.Message) -> None:
         "✏️ <b>Actions:</b>\n"
         "  /send <chat> <msg> - Send message (requires approval)\n"
         "  /recent - Show recent actions\n\n"
+        "📢 <b>Каналы:</b>\n"
+        "  /scan_channel [N] - Последние N постов из каналов (по умолч. 10)\n\n"
         "⚙️ <b>Settings:</b>\n"
         "  /style - Show prompt configuration\n"
         "  /help - This help message"

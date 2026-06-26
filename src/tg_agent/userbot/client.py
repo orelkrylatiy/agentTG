@@ -70,7 +70,7 @@ class UserbotClient:
         await self.client.start(
             phone=self.settings.tg_phone,
             code_callback=self._get_code,
-            password_callback=self._get_password,
+            password=self._get_password,
         )
 
         # Get me info

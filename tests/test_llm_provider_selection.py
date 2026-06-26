@@ -3,6 +3,7 @@ Tests for LLM provider selection and fallback.
 """
 
 from unittest.mock import MagicMock, patch
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,11 @@ class TestLLMClientProviderSelection:
         settings.openai_fallback_model = "gpt-4o-mini"
         settings.openrouter_fallback_model = "openrouter/openai/gpt-4o-mini"
         settings.max_reply_chars = 800
+        settings.chatgpt_token_dir_path = Path("/tmp/chatgpt")
+        settings.chatgpt_auth_file_path = Path("/tmp/chatgpt/auth.json")
+        settings.chatgpt_auth_file = "auth.json"
+        settings.chatgpt_api_base = "https://chatgpt.com/backend-api/codex"
+        settings.chatgpt_originator = "codex_cli_rs"
         return settings
 
     @pytest.fixture
@@ -71,6 +77,11 @@ class TestLLMClientProviderSelection:
         settings.openai_fallback_model = "gpt-4o-mini"
         settings.openrouter_fallback_model = "openrouter/openai/gpt-4o-mini"
         settings.max_reply_chars = 800
+        settings.chatgpt_token_dir_path = Path("/tmp/chatgpt")
+        settings.chatgpt_auth_file_path = Path("/tmp/chatgpt/auth.json")
+        settings.chatgpt_auth_file = "auth.json"
+        settings.chatgpt_api_base = "https://chatgpt.com/backend-api/codex"
+        settings.chatgpt_originator = "codex_cli_rs"
         return settings
 
     @pytest.fixture
@@ -84,6 +95,11 @@ class TestLLMClientProviderSelection:
         settings.openai_fallback_model = "gpt-4o-mini"
         settings.openrouter_fallback_model = "openrouter/openai/gpt-4o-mini"
         settings.max_reply_chars = 800
+        settings.chatgpt_token_dir_path = Path("/tmp/chatgpt")
+        settings.chatgpt_auth_file_path = Path("/tmp/chatgpt/auth.json")
+        settings.chatgpt_auth_file = "auth.json"
+        settings.chatgpt_api_base = "https://chatgpt.com/backend-api/codex"
+        settings.chatgpt_originator = "codex_cli_rs"
         return settings
 
     def test_primary_chatgpt(self, mock_settings_chatgpt):
@@ -149,6 +165,11 @@ class TestLLMClientProviderFallback:
         settings.openai_fallback_model = "gpt-4o-mini"
         settings.openrouter_fallback_model = "openrouter/openai/gpt-4o-mini"
         settings.max_reply_chars = 800
+        settings.chatgpt_token_dir_path = Path("/tmp/chatgpt")
+        settings.chatgpt_auth_file_path = Path("/tmp/chatgpt/auth.json")
+        settings.chatgpt_auth_file = "auth.json"
+        settings.chatgpt_api_base = "https://chatgpt.com/backend-api/codex"
+        settings.chatgpt_originator = "codex_cli_rs"
         return settings
 
     @pytest.mark.asyncio

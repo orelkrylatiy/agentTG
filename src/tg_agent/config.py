@@ -3,8 +3,10 @@ Application configuration using pydantic-settings.
 """
 
 from functools import lru_cache
+import os
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +14,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables and .env file."""
+
+    ALLOWED_CHATGPT_API_BASE_HOSTS: ClassVar[frozenset[str]] = frozenset(
+        {"chatgpt.com", "chat.openai.com"}
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -57,9 +63,20 @@ class Settings(BaseSettings):
     )
     llm_model: str = Field(default="chatgpt/gpt-5", alias="LLM_MODEL")
     litellm_chatgpt_enabled: bool = Field(default=True, alias="LITELLM_CHATGPT_ENABLED")
+    chatgpt_token_dir: str = Field(
+        default="data/litellm/chatgpt", alias="CHATGPT_TOKEN_DIR"
+    )
+    chatgpt_auth_file: str = Field(default="auth.json", alias="CHATGPT_AUTH_FILE")
+    chatgpt_api_base: str = Field(
+        default="https://chatgpt.com/backend-api/codex", alias="CHATGPT_API_BASE"
+    )
+    chatgpt_originator: str = Field(
+        default="codex_cli_rs", alias="CHATGPT_ORIGINATOR"
+    )
 
     # Fallback providers
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    openai_api_base: str = Field(default="", alias="OPENAI_API_BASE")
     openai_fallback_model: str = Field(default="gpt-4o-mini", alias="OPENAI_FALLBACK_MODEL")
 
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
@@ -78,6 +95,24 @@ class Settings(BaseSettings):
     # Context limits
     max_context_messages: int = Field(default=12, alias="MAX_CONTEXT_MESSAGES")
     max_reply_chars: int = Field(default=800, alias="MAX_REPLY_CHARS")
+
+    # Channel monitoring
+    monitored_channels: str = Field(default="", alias="MONITORED_CHANNELS")
+
+    @property
+    def monitored_channel_ids(self) -> list[int]:
+        """Parse MONITORED_CHANNELS into list of int IDs."""
+        if not self.monitored_channels:
+            return []
+        result = []
+        for part in self.monitored_channels.split(","):
+            part = part.strip()
+            if part:
+                try:
+                    result.append(int(part))
+                except ValueError:
+                    pass
+        return result
 
     # Safety settings
     require_approval_for_unknown_chats: bool = Field(
@@ -111,6 +146,36 @@ class Settings(BaseSettings):
             raise ValueError("CONTROL_BOT_TOKEN must be set")
         return v
 
+    @field_validator("chatgpt_token_dir")
+    @classmethod
+    def validate_chatgpt_token_dir(cls, value: str) -> str:
+        candidate = Path(os.path.expanduser(value))
+        if ".." in candidate.parts:
+            raise ValueError("CHATGPT_TOKEN_DIR must not contain '..'")
+        return value
+
+    @field_validator("chatgpt_auth_file")
+    @classmethod
+    def validate_chatgpt_auth_file(cls, value: str) -> str:
+        candidate = Path(value)
+        if candidate.is_absolute():
+            raise ValueError("CHATGPT_AUTH_FILE must be a relative file name")
+        if ".." in candidate.parts or len(candidate.parts) != 1:
+            raise ValueError("CHATGPT_AUTH_FILE must be a single file name")
+        return value
+
+    @field_validator("chatgpt_api_base")
+    @classmethod
+    def validate_chatgpt_api_base(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme != "https":
+            raise ValueError("CHATGPT_API_BASE must use https")
+        if parsed.hostname not in cls.ALLOWED_CHATGPT_API_BASE_HOSTS:
+            raise ValueError("CHATGPT_API_BASE host is not allowed")
+        if not parsed.path.startswith("/backend-api/"):
+            raise ValueError("CHATGPT_API_BASE path must start with /backend-api/")
+        return value.rstrip("/")
+
     @property
     def project_root(self) -> Path:
         """Return project root directory."""
@@ -128,6 +193,26 @@ class Settings(BaseSettings):
         if data_path.is_absolute():
             return data_path
         return self.project_root / data_path
+
+    @property
+    def chatgpt_token_dir_path(self) -> Path:
+        """Return the effective LiteLLM ChatGPT token directory."""
+        token_dir = Path(os.path.expanduser(self.chatgpt_token_dir))
+        resolved = token_dir.resolve() if token_dir.is_absolute() else (self.project_root / token_dir).resolve()
+        if not resolved.is_relative_to(self.project_root):
+            raise ValueError("CHATGPT_TOKEN_DIR must stay inside the project root")
+        return resolved
+
+    @property
+    def chatgpt_auth_file_path(self) -> Path:
+        """Return the effective ChatGPT auth file path."""
+        auth_file = Path(self.chatgpt_auth_file)
+        if auth_file.is_absolute():
+            return auth_file
+        resolved = (self.chatgpt_token_dir_path / auth_file).resolve()
+        if not resolved.is_relative_to(self.project_root):
+            raise ValueError("CHATGPT_AUTH_FILE must resolve inside the project root")
+        return resolved
 
 
 @lru_cache

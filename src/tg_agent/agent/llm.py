@@ -5,6 +5,7 @@ LLM client using LiteLLM with provider fallback.
 from dataclasses import dataclass
 from enum import Enum
 import inspect
+import os
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -124,9 +125,25 @@ class LLMClient:
 
     def _configure_litellm(self) -> None:
         """Configure LiteLLM with API keys."""
-        # OpenAI
+        if self.settings.litellm_chatgpt_enabled:
+            token_dir = self.settings.chatgpt_token_dir_path
+            try:
+                token_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.error(f"Failed to create ChatGPT token directory at {token_dir}: {exc}")
+                raise RuntimeError(
+                    f"Failed to create ChatGPT token directory at {token_dir}"
+                ) from exc
+            os.environ["CHATGPT_TOKEN_DIR"] = str(token_dir)
+            os.environ["CHATGPT_AUTH_FILE"] = self.settings.chatgpt_auth_file
+            os.environ["CHATGPT_API_BASE"] = self.settings.chatgpt_api_base
+            os.environ["CHATGPT_ORIGINATOR"] = self.settings.chatgpt_originator
+
+        # OpenAI (also covers LM Studio / local OpenAI-compatible servers)
         if self.settings.openai_api_key:
             litellm.openai_api_key = self.settings.openai_api_key
+        if api_base := str(self.settings.openai_api_base or ""):
+            os.environ["OPENAI_API_BASE"] = api_base
 
         # OpenRouter
         if self.settings.openrouter_api_key:
@@ -135,8 +152,8 @@ class LLMClient:
         # ChatGPT OAuth doesn't need a key - uses device code flow
         # User must run litellm authentication separately
 
-        # Set default timeout
-        litellm.request_timeout = 30
+        # Set default timeout — qwen3 thinking mode can be slow
+        litellm.request_timeout = 120
 
         # Disable telemetry
         litellm.telemetry = False
@@ -166,6 +183,10 @@ class LLMClient:
             config["model"] = self.settings.openai_fallback_model
             config["temperature"] = 0.7
             config["max_tokens"] = min(self.settings.max_reply_chars, 1000)
+            if self.settings.openai_api_base:
+                config["api_base"] = self.settings.openai_api_base
+            # Disable qwen3 extended thinking via LM Studio API
+            config["extra_body"] = {"enable_thinking": False}
 
         elif provider == LLMProvider.OPENROUTER:
             config["model"] = self.settings.openrouter_fallback_model
@@ -199,6 +220,16 @@ class LLMClient:
             {"role": "system", "content": system_prompt},
             *messages,
         ]
+
+        # Prepend /no_think to last user message to disable qwen3 thinking mode
+        for i in range(len(full_messages) - 1, -1, -1):
+            if full_messages[i]["role"] == "user":
+                if not full_messages[i]["content"].startswith("/no_think"):
+                    full_messages[i] = {
+                        **full_messages[i],
+                        "content": "/no_think\n" + full_messages[i]["content"],
+                    }
+                break
 
         # Try primary provider first
         providers_to_try = [self.primary_provider] + self.fallback_chain
@@ -255,6 +286,10 @@ class LLMClient:
         """
         config = self._get_provider_config(provider)
         model = config.pop("model")
+        oauth_context = (
+            f" token_dir={self.settings.chatgpt_token_dir_path}"
+            f" api_base={self.settings.chatgpt_api_base}"
+        )
 
         try:
             completion_result = litellm.acompletion(
@@ -270,14 +305,22 @@ class LLMClient:
 
             content = response.choices[0].message.content
 
-            if content is None:
-                return LLMResponse(
-                    content="",
-                    provider=provider,
-                    model=model,
-                    success=False,
-                    error_message="Empty response from LLM",
-                )
+            if not content:
+                rc = getattr(response.choices[0].message, "reasoning_content", None)
+                if rc:
+                    content = rc
+                else:
+                    return LLMResponse(
+                        content="",
+                        provider=provider,
+                        model=model,
+                        success=False,
+                        error_message="Empty response from LLM",
+                    )
+
+            # Strip qwen3 <think>...</think> blocks from content
+            import re as _re
+            content = _re.sub(r"<think>.*?</think>", "", content, flags=_re.DOTALL).strip()
 
             # Truncate if too long
             if len(content) > self.settings.max_reply_chars:
@@ -296,7 +339,7 @@ class LLMClient:
                 provider=provider,
                 model=model,
                 success=False,
-                error_message=f"Authentication error: {e}",
+                error_message=f"Authentication error: {e}.{oauth_context}",
             )
 
         except _get_litellm_exception("RateLimitError") as e:
@@ -333,6 +376,18 @@ class LLMClient:
             "primary_model": self.settings.llm_model,
             "fallback_providers": [p.value for p in self.fallback_chain],
             "chatgpt_oauth_enabled": self.settings.litellm_chatgpt_enabled,
+            "chatgpt_token_dir": str(self.settings.chatgpt_token_dir_path),
+            "chatgpt_auth_file": str(self.settings.chatgpt_auth_file_path),
             "openai_configured": bool(self.settings.openai_api_key),
             "openrouter_configured": bool(self.settings.openrouter_api_key),
         }
+
+    async def smoke_test(
+        self,
+        prompt: str = "Reply with exactly: CHATGPT_OAUTH_OK",
+    ) -> LLMResponse:
+        """Run a minimal provider smoke test."""
+        return await self.generate_reply(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You are a terse connectivity test.",
+        )
