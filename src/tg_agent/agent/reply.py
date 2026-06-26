@@ -71,15 +71,16 @@ class ReplyGenerator:
         # Get sender name
         sender_name = self._get_sender_name(incoming_message)
 
-        # Build context from recent messages
-        context_str = self._build_context(context_messages or [])
+        # Build context from recent messages as proper user/assistant turns
+        context_turns = self._build_context_turns(context_messages or [])
 
-        # Create messages for LLM
-        messages = self.prompt_manager.create_reply_request(
-            chat_context=context_str,
-            incoming_message=message_text,
-            sender_name=sender_name,
-        )
+        # Current message always goes last as user role
+        if sender_name:
+            current = {"role": "user", "content": f"[{sender_name}]: {message_text}"}
+        else:
+            current = {"role": "user", "content": message_text}
+
+        messages = context_turns + [current]
 
         # Get system prompt
         system_prompt = self.prompt_manager.get_full_system_prompt()
@@ -134,6 +135,29 @@ class ReplyGenerator:
             return f"@{message.sender.username}"
 
         return None
+
+    def _build_context_turns(self, messages: list[Message]) -> list[dict]:
+        """Build proper user/assistant turns from recent messages."""
+        if not messages:
+            return []
+
+        recent = messages[-self.max_context_messages:]
+        turns = []
+        for msg in recent:
+            if not msg.text:
+                continue
+            text = msg.text[:300] + "..." if len(msg.text) > 300 else msg.text
+            role = "assistant" if msg.out else "user"
+            turns.append({"role": role, "content": text})
+
+        # Merge consecutive same-role messages (LLM APIs require alternating)
+        merged: list[dict] = []
+        for turn in turns:
+            if merged and merged[-1]["role"] == turn["role"]:
+                merged[-1]["content"] += "\n" + turn["content"]
+            else:
+                merged.append(dict(turn))
+        return merged
 
     def _build_context(self, messages: list[Message]) -> str:
         """
