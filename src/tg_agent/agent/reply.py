@@ -141,9 +141,8 @@ class ReplyGenerator:
         if not messages:
             return []
 
-        recent = messages[-self.max_context_messages:]
         turns = []
-        for msg in recent:
+        for msg in messages:
             if not msg.text:
                 continue
             text = msg.text[:300] + "..." if len(msg.text) > 300 else msg.text

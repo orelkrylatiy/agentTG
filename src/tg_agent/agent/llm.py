@@ -181,11 +181,11 @@ class LLMClient:
 
         elif provider == LLMProvider.OPENAI:
             config["model"] = self.settings.openai_fallback_model
-            config["temperature"] = 0.7
-            config["max_tokens"] = 800
+            config["temperature"] = 0.25
+            config["max_tokens"] = 120
             if self.settings.openai_api_base:
                 config["api_base"] = self.settings.openai_api_base
-            config["extra_body"] = {"enable_thinking": True}
+            config["extra_body"] = {"enable_thinking": False}
 
         elif provider == LLMProvider.OPENROUTER:
             config["model"] = self.settings.openrouter_fallback_model

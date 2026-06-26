@@ -307,7 +307,7 @@ class IncomingMessageHandler:
                 limit=self.settings.max_context_messages,
                 max_id=current_message_id - 1,  # Exclude current message
             )
-            return list(messages) if messages else []
+            return list(reversed(messages)) if messages else []
         except Exception as e:
             logger.error(f"Failed to get context messages: {e}")
             return []
