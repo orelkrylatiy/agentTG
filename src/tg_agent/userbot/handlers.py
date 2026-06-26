@@ -155,6 +155,12 @@ class IncomingMessageHandler:
 
         logger.info(f"New message in chat {chat_id} from {sender_id}")
 
+        # Mark message as read
+        try:
+            await self.client.send_read_acknowledge(chat_id, max_id=message.id)
+        except Exception:
+            pass
+
         try:
             _chat = await event.get_chat()
         except Exception:
