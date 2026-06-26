@@ -72,33 +72,64 @@ class IncomingMessageHandler:
         """Register event handlers with the client."""
         self.client.add_event_handler(
             self._on_new_message,
-            events.NewMessage(incoming=True),
+            events.NewMessage(),
         )
         logger.info("Incoming message handler registered")
 
     async def _on_new_message(self, event: events.NewMessage) -> None:
-        """
-        Handle new incoming message.
+        try:
+            await self._handle_message(event)
+        except Exception as e:
+            logger.exception(f"Unhandled error in message handler: {e}")
 
-        Args:
-            event: New message event.
-        """
+    async def _handle_message(self, event: events.NewMessage) -> None:
         message = event.message
         chat_id = event.chat_id
-        sender_id = event.sender_id if event.sender else None
+        sender_id = event.sender_id
+
+        logger.debug(f"Event: chat={chat_id} sender={sender_id} out={message.out}")
 
         # Skip messages from self
         if message.out:
             return
 
         # Skip messages from bots
-        if event.sender and event.sender.bot:
+        if event.sender and getattr(event.sender, "bot", False):
             logger.debug(f"Skipping bot message from {sender_id}")
             return
 
+        # Skip the control bot's own chat
+        control_bot_id = int(self.settings.control_bot_token.split(":")[0])
+        if chat_id == control_bot_id or sender_id == control_bot_id:
+            logger.debug(f"Skipping control bot chat/message")
+            return
+
+        # In group/supergroup chats only respond if mentioned or replied to
+        from telethon.tl.types import Chat, Channel
+        _chat_obj = getattr(event, "chat", None)
+        is_group = isinstance(_chat_obj, (Chat, Channel)) and getattr(_chat_obj, "megagroup", False) or isinstance(_chat_obj, Chat)
+        if is_group:
+            me = await event.client.get_me()
+            mentioned = message.mentioned  # Telegram sets this when @username is in text
+            reply_to_self = (
+                message.reply_to
+                and hasattr(message.reply_to, "reply_to_msg_id")
+                and await self._is_reply_to_self(event, me.id)
+            )
+            if not mentioned and not reply_to_self:
+                logger.debug(f"Group message without mention/reply, skipping")
+                return
+
         logger.info(f"New message in chat {chat_id} from {sender_id}")
 
-        chat_title = getattr(getattr(event, "chat", None), "title", None)
+        try:
+            _chat = await event.get_chat()
+        except Exception:
+            _chat = getattr(event, "chat", None)
+        chat_title = getattr(_chat, "title", None) or " ".join(filter(None, [
+            getattr(_chat, "first_name", None),
+            getattr(_chat, "last_name", None),
+        ])) or None
         with self.db.get_sync_session() as session:
             chat_settings_repo = ChatSettingsRepo(session)
             message_log_repo = MessageLogRepo(session)
@@ -240,6 +271,14 @@ class IncomingMessageHandler:
                 ChatSettingsRepo(session).update_last_agent_reply(chat_id)
 
             logger.info(f"Auto-reply sent to chat {chat_id}")
+
+    async def _is_reply_to_self(self, event, my_id: int) -> bool:
+        """Check if message is a reply to one of our messages."""
+        try:
+            replied = await event.message.get_reply_message()
+            return replied is not None and replied.sender_id == my_id
+        except Exception:
+            return False
 
     async def _get_context_messages(
         self,

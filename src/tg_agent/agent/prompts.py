@@ -52,19 +52,11 @@ class PromptManager:
 
     @property
     def system_prompt(self) -> str:
-        """Get system prompt, loading if necessary."""
-        if self._system_prompt is None:
-            self._system_prompt = self._load_prompt_file("system.ru.txt")
-
-            if not self._system_prompt:
-                # Fallback default
-                self._system_prompt = (
-                    "Ты — Telegram-ассистент владельца аккаунта. "
-                    "Отвечай кратко и естественно, как в обычной переписке."
-                )
-                logger.warning("Using default system prompt")
-
-        return self._system_prompt
+        """Always reload from file so edits take effect without restart."""
+        prompt = self._load_prompt_file("system.ru.txt")
+        if not prompt:
+            return "Отвечай кратко и естественно, как в обычной переписке в Telegram."
+        return prompt
 
     @property
     def safety_prompt(self) -> str:

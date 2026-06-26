@@ -201,11 +201,12 @@ async def cmd_chats(message: types.Message, db: Database) -> None:
             return
 
         lines = ["📋 <b>Configured Chats:</b>\n"]
-        for chat in chats[:20]:  # Limit to 20
+        for chat in chats[:20]:
             trust_icon = "🔒" if chat.is_trusted else "🔓"
+            name = chat.chat_title or f"ID: {chat.chat_id}"
             lines.append(
-                f"• {chat.chat_title or f'Chat {chat.chat_id}'}\n"
-                f"  Mode: {chat.mode.value} {trust_icon}"
+                f"• <b>{name}</b>\n"
+                f"  ID: <code>{chat.chat_id}</code> | Режим: {chat.mode.value} {trust_icon}"
             )
 
         if len(chats) > 20:

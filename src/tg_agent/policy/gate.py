@@ -147,14 +147,6 @@ class PolicyGate:
             )
 
         if mode == ChatMode.AUTO:
-            # AUTO mode - check if trusted and safe
-            if not chat_settings.is_trusted:
-                return PolicyDecision(
-                    should_process=True,
-                    action="draft",
-                    reason="AUTO mode but chat not trusted",
-                    requires_approval=True,
-                )
 
             # Check cooldown
             if not self.cooldown_manager.can_reply(chat_settings.chat_id):
@@ -173,8 +165,8 @@ class PolicyGate:
                     requires_approval=True,
                 )
 
-            # Check if initiative message requires approval
-            if (
+            # In AUTO mode initiative check is skipped — user set AUTO explicitly
+            if False and (
                 is_initiative
                 and self.settings.require_approval_for_initiative_messages
             ):

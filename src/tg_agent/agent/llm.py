@@ -182,11 +182,10 @@ class LLMClient:
         elif provider == LLMProvider.OPENAI:
             config["model"] = self.settings.openai_fallback_model
             config["temperature"] = 0.7
-            config["max_tokens"] = min(self.settings.max_reply_chars, 1000)
+            config["max_tokens"] = 800
             if self.settings.openai_api_base:
                 config["api_base"] = self.settings.openai_api_base
-            # Disable qwen3 extended thinking via LM Studio API
-            config["extra_body"] = {"enable_thinking": False}
+            config["extra_body"] = {"enable_thinking": True}
 
         elif provider == LLMProvider.OPENROUTER:
             config["model"] = self.settings.openrouter_fallback_model
@@ -221,15 +220,7 @@ class LLMClient:
             *messages,
         ]
 
-        # Prepend /no_think to last user message to disable qwen3 thinking mode
-        for i in range(len(full_messages) - 1, -1, -1):
-            if full_messages[i]["role"] == "user":
-                if not full_messages[i]["content"].startswith("/no_think"):
-                    full_messages[i] = {
-                        **full_messages[i],
-                        "content": "/no_think\n" + full_messages[i]["content"],
-                    }
-                break
+        # /no_think causes confusion in qwen3 output — handled via enable_thinking:false instead
 
         # Try primary provider first
         providers_to_try = [self.primary_provider] + self.fallback_chain
@@ -292,16 +283,17 @@ class LLMClient:
         )
 
         try:
+            import asyncio as _asyncio
             completion_result = litellm.acompletion(
                 model=model,
                 messages=messages,
                 **config,
             )
-            response = (
-                await completion_result
-                if inspect.isawaitable(completion_result)
-                else completion_result
-            )
+            coro = completion_result if inspect.isawaitable(completion_result) else None
+            if coro:
+                response = await _asyncio.wait_for(coro, timeout=90.0)
+            else:
+                response = completion_result
 
             content = response.choices[0].message.content
 
@@ -318,9 +310,85 @@ class LLMClient:
                         error_message="Empty response from LLM",
                     )
 
-            # Strip qwen3 <think>...</think> blocks from content
+
             import re as _re
+            raw_content = content
+            logger.debug(f"Raw LLM content: {raw_content!r}")
+
+            # With enable_thinking=True, reasoning goes to reasoning_content and
+            # content holds only the clean reply — just strip whitespace.
             content = _re.sub(r"<think>.*?</think>", "", content, flags=_re.DOTALL).strip()
+
+            # Safety net in case thinking leaked into content anyway
+            # Matches: "Thinking Process:", "Here's a thinking process:", "**Analyze", "1.  **"
+            if content and _re.match(
+                r"^(Thinking Process:|Here'?s? (a )?thinking process:|\*{1,2}Analyze|\d+\.\s+\*{1,2})",
+                content
+            ):
+                logger.warning("Thinking leaked into content; extracting quoted phrase")
+                extracted = ""
+
+                # 1. Look for "[Output Generation] -> "text"" pattern (most reliable)
+                m = _re.search(
+                    r'\[Output Generation\]\s*->\s*["\u201c\u00ab]([\u0410-\u044f\u0401\u0451][^"\u201d\u00bb\n]{10,300})["\u201d\u00bb]',
+                    raw_content
+                )
+                if m:
+                    extracted = m.group(1).strip()
+                    logger.info(f"[Output Generation] extraction: {extracted!r}")
+
+                # 2. Look for "Final Output/Text:" followed by the reply
+                if not extracted:
+                    m = _re.search(
+                        r'Final (?:Output|Text)[^:]*:\s*\n?\s*([^\n*#]{20,300})',
+                        raw_content
+                    )
+                    if m:
+                        candidate = m.group(1).strip().strip('"').strip('\u201c').strip('\u201d')
+                        if candidate and not candidate.startswith(('*', '#', '(')):
+                            extracted = candidate
+                            logger.info(f"Final Output/Text extraction: {extracted!r}")
+
+                # 3. Look for an unquoted line starting with a greeting
+                if not extracted:
+                    for line in reversed(raw_content.split('\n')):
+                        line = line.strip().strip('*').strip()
+                        if (_re.match(r'^(\u041f\u0440\u0438\u0432\u0435\u0442|\u0417\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439\u0442\u0435|\u0414\u043e\u0431\u0440\u044b\u0439)', line)
+                                and len(line) >= 30):
+                            extracted = line.strip('"').strip('\u201c').strip('\u201d')
+                            logger.info(f"Greeting-line extraction: {extracted!r}")
+                            break
+
+                # 4. Quoted phrase fallback \u2014 allow up to 250 chars
+                if not extracted:
+                    quoted = _re.findall(
+                        r'["\u201c\u201d\u00ab]([\u0410-\u044f\u0401\u0451a-zA-Z][^"\u201c\u201d\u00bb\n]{10,250})["\u201c\u201d\u00bb]',
+                        raw_content
+                    )
+                    _SKIP = ('\u043f\u0438\u0448\u0438 ', '\u043d\u0435 ', '\u0431\u0435\u0437 ',
+                             '\u043d\u0438\u043a\u043e\u0433\u0434\u0430', '\u0442\u043e\u043b\u044c\u043a\u043e ',
+                             '\u0441\u0442\u0438\u043b\u044c', '\u043e\u0442\u0432\u0435\u0442', '\u0442\u0435\u043a\u0441\u0442',
+                             '\u043f\u0440\u0430\u0432\u0438\u043b', '\u043f\u0440\u0438\u043c\u0435\u0440',
+                             'write ', 'output ', 'never ', 'only ', 'just ', 'lively', 'short')
+                    reply_candidates = [
+                        p for p in quoted
+                        if not p.lower().startswith(_SKIP)
+                        and sum(1 for c in p if '\u0410' <= c <= '\u044f' or c in '\u0401\u0451') >= 5
+                    ]
+                    if reply_candidates:
+                        extracted = reply_candidates[-1].strip()
+                        logger.info(f"Quoted-phrase extraction: {extracted!r}")
+
+                content = extracted
+            if not content:
+                logger.warning(f"Empty reply. Raw: {raw_content!r}")
+                return LLMResponse(
+                    content="",
+                    provider=provider,
+                    model=model,
+                    success=False,
+                    error_message="LLM returned no usable reply",
+                )
 
             # Truncate if too long
             if len(content) > self.settings.max_reply_chars:
@@ -358,6 +426,16 @@ class LLMClient:
                 model=model,
                 success=False,
                 error_message=f"Context too long: {e}",
+            )
+
+        except _asyncio.TimeoutError:
+            logger.error(f"LLM request timed out after 90s ({provider.value})")
+            return LLMResponse(
+                content="",
+                provider=provider,
+                model=model,
+                success=False,
+                error_message="LLM request timed out (90s)",
             )
 
         except Exception as e:

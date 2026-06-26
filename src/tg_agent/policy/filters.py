@@ -100,20 +100,8 @@ class MessageFilter:
         return len(reasons) > 0, reasons
 
     def is_bot_message(self, sender_id: int | None, via_bot: bool = False) -> bool:
-        """
-        Check if message is from a bot.
-
-        Bot IDs in Telegram are typically in specific ranges.
-        """
-        if via_bot:
-            return True
-
-        if sender_id is None:
-            return False
-
-        # Telegram bot IDs are typically > 1000000000
-        # But this is heuristic - better to use via_bot flag
-        return sender_id > 1_000_000_000 and sender_id < 2_000_000_000
+        """Check if message is from a bot (only via_bot flag is reliable)."""
+        return via_bot
 
     def is_initiative_message(
         self,

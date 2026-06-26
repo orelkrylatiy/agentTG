@@ -6,7 +6,7 @@ Personal Telegram AI userbot agent with control bot and Human-in-the-Loop (HITL)
 
 **Before using this project:**
 
-1. **Use a test Telegram account** — Do NOT use your primary Telegram account. Create a separate test account via [test.phone](https://test.phone/) or use a secondary SIM.
+1. **Use a test Telegram account** — Do NOT use your primary Telegram account. Register a separate account on a spare phone number (e.g. a secondary SIM or a virtual number) and test against that.
 2. **Telegram ToS** — Userbot automation may violate Telegram Terms of Service. Use at your own risk.
 3. **Start in safe mode** — Agent starts with `AGENT_GLOBAL_ENABLED=false` and `DEFAULT_CHAT_MODE=DRAFT`. Never enable AUTO mode for untrusted chats.
 4. **Privacy** — All messages are processed locally. LLM providers receive message content for reply generation.
@@ -139,22 +139,70 @@ python -m tg_agent.main
 
 On first run, Telethon will prompt for the login code sent to your Telegram. Enter it in the terminal.
 
+### Step 6.5: Verify Subscription OAuth Before Telegram Testing
+
+If you want the agent to use your ChatGPT subscription through LiteLLM, validate that path first:
+
+```bash
+python -m tg_agent.smoke_llm
+```
+
+Do this before debugging Telegram message handling. The correct order is:
+1. make `chatgpt_oauth` work
+2. confirm tokens are persisted under `data/litellm/chatgpt/`
+3. only then start `python -m tg_agent.main`
+
 ## LLM Configuration
 
 ### ChatGPT OAuth (Primary)
 
 This project uses LiteLLM's ChatGPT OAuth provider to leverage your ChatGPT Plus subscription.
 
-**Setup:**
+**Recommended setup flow:**
 
-1. Install LiteLLM proxy (optional, for advanced usage):
+1. Configure `.env`:
+   ```env
+   LLM_PROVIDER=chatgpt_oauth
+   LLM_MODEL=chatgpt/gpt-5
+   LITELLM_CHATGPT_ENABLED=true
+   CHATGPT_TOKEN_DIR=data/litellm/chatgpt
+   CHATGPT_AUTH_FILE=auth.json
+   CHATGPT_API_BASE=https://chatgpt.com/backend-api/codex
+   CHATGPT_ORIGINATOR=codex_cli_rs
+   ```
+
+2. Run the smoke test:
+   ```bash
+   python -m tg_agent.smoke_llm
+   ```
+
+3. If LiteLLM starts device-code auth, complete that login in the browser with the subscription account you want the Telegram agent to use.
+
+4. Confirm token files appear in `data/litellm/chatgpt/`. These files must survive restarts and Docker container recreation.
+
+5. Only after the smoke test succeeds, run the full Telegram agent:
+   ```bash
+   python -m tg_agent.main
+   ```
+
+**Optional:**
+
+Install LiteLLM proxy extras if you need them:
    ```bash
    pip install 'litellm[proxy]'
    ```
 
-2. The `chatgpt/` provider in LiteLLM uses OAuth device code flow. You may need to authenticate separately.
+If ChatGPT OAuth fails on your machine or VPS, switch providers through `.env` and use the fallback path.
 
-3. If ChatGPT OAuth doesn't work in your region, use fallback providers.
+**Security constraints on OAuth settings:**
+
+For safety, the config layer validates the ChatGPT OAuth variables and will refuse to start otherwise:
+
+- `CHATGPT_API_BASE` must use `https` and point at an allowed host (`chatgpt.com` or `chat.openai.com`) with a path under `/backend-api/`.
+- `CHATGPT_TOKEN_DIR` must resolve inside the project root (no `..` traversal, no absolute path outside the repo).
+- `CHATGPT_AUTH_FILE` must be a single relative file name (no nested or absolute paths).
+
+The token directory is created automatically on startup; in Docker it is also persisted via the `./data/litellm` volume.
 
 ### OpenAI Fallback
 
@@ -301,6 +349,14 @@ pytest --cov=tg_agent --cov-report=html
 pytest tests/test_policy.py -v
 ```
 
+> Note: the project targets Python 3.11/3.12. On systems where `python` points at Python 2, use `python3 -m pytest`.
+
+To check live LLM/OAuth connectivity (not a unit test, makes a real provider call):
+
+```bash
+python -m tg_agent.smoke_llm
+```
+
 ## Project Structure
 
 ```
@@ -319,6 +375,7 @@ telegram-ai-userbot-agent/
 │   ├── main.py            # Entry point
 │   ├── config.py          # Settings
 │   ├── logging.py         # Logging setup
+│   ├── smoke_llm.py       # LLM/OAuth connectivity smoke test
 │   ├── userbot/
 │   │   ├── client.py      # Telethon client
 │   │   ├── handlers.py    # Message handlers
@@ -348,7 +405,9 @@ telegram-ai-userbot-agent/
     ├── test_policy.py
     ├── test_cooldown.py
     ├── test_hitl.py
-    └── test_llm_provider_selection.py
+    ├── test_llm_provider_selection.py
+    ├── test_oauth_config.py        # ChatGPT OAuth config hardening
+    └── test_smoke_llm.py           # smoke_llm entrypoint
 ```
 
 ## Roadmap

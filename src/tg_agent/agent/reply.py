@@ -158,7 +158,8 @@ class ReplyGenerator:
 
             sender = self._get_sender_name(msg) or "Unknown"
             direction = "→" if msg.out else "←"
-            context_lines.append(f"{direction} [{sender}]: {msg.text}")
+            text = msg.text[:300] + "..." if len(msg.text) > 300 else msg.text
+            context_lines.append(f"{direction} [{sender}]: {text}")
 
         return "\n".join(context_lines)
 
