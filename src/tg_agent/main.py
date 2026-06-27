@@ -69,15 +69,6 @@ class Agent:
         await self.control_bot.start()
         logger.info("Control bot initialized")
 
-        # Setup control bot handlers
-        setup_control_handlers(
-            dp=self.control_bot.dispatcher,
-            settings=self.settings,
-            db=self.db,
-            control_bot=self.control_bot,
-            userbot_client=self.userbot.client,
-        )
-
         # Initialize userbot
         await self.userbot.start()
         logger.info("Userbot initialized")
@@ -114,9 +105,20 @@ class Agent:
             settings=self.settings,
             client=self.userbot.client,
             control_bot=self.control_bot,
+            db=self.db,
             llm_client=self.llm_client,
         )
         channel_handler.register_handlers()
+
+        # Setup control bot handlers (after channel_handler so we can pass it)
+        setup_control_handlers(
+            dp=self.control_bot.dispatcher,
+            settings=self.settings,
+            db=self.db,
+            control_bot=self.control_bot,
+            userbot_client=self.userbot.client,
+            channel_handler=channel_handler,
+        )
 
         # LLM health check
         logger.info("Checking LLM connectivity...")

@@ -381,6 +381,11 @@ class LLMClient:
 
                 # 4. Quoted phrase fallback \u2014 allow up to 250 chars
                 if not extracted:
+                    # Get last user message to avoid echoing it back
+                    last_user_msg = next(
+                        (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
+                    ).lower()
+
                     quoted = _re.findall(
                         r'["\u201c\u201d\u00ab]([\u0410-\u044f\u0401\u0451a-zA-Z][^"\u201c\u201d\u00bb\n]{10,250})["\u201c\u201d\u00bb]',
                         raw_content
@@ -393,6 +398,7 @@ class LLMClient:
                     reply_candidates = [
                         p for p in quoted
                         if not p.lower().startswith(_SKIP)
+                        and p.lower().strip() not in last_user_msg  # don't echo input
                         and sum(1 for c in p if '\u0410' <= c <= '\u044f' or c in '\u0401\u0451') >= 5
                     ]
                     if reply_candidates:

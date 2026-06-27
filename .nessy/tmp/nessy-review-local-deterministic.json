@@ -1,0 +1,72 @@
+{
+  "worktree": "/Users/m.s.agafonov/Desktop/agentTG",
+  "changedFiles": [
+    "src/tg_agent/agent/llm.py",
+    "src/tg_agent/config.py",
+    "tests/test_llm_provider_selection.py"
+  ],
+  "findings": [
+    {
+      "source": "linter",
+      "tool": "ruff",
+      "file": "src/tg_agent/agent/llm.py",
+      "line": 5,
+      "column": 1,
+      "severity": "Critical",
+      "message": "Import block is un-sorted or un-formatted",
+      "ruleId": "I001"
+    },
+    {
+      "source": "linter",
+      "tool": "ruff",
+      "file": "src/tg_agent/config.py",
+      "line": 5,
+      "column": 1,
+      "severity": "Critical",
+      "message": "Import block is un-sorted or un-formatted",
+      "ruleId": "I001"
+    },
+    {
+      "source": "linter",
+      "tool": "ruff",
+      "file": "tests/test_llm_provider_selection.py",
+      "line": 5,
+      "column": 1,
+      "severity": "Critical",
+      "message": "Import block is un-sorted or un-formatted",
+      "ruleId": "I001"
+    }
+  ],
+  "toolsRun": [
+    {
+      "tool": "ruff",
+      "source": "linter",
+      "exitCode": 1,
+      "durationMs": 210,
+      "findingsCount": 3,
+      "timedOut": false
+    }
+  ],
+  "toolsSkipped": [
+    {
+      "tool": "tsc",
+      "reason": "tsconfig.json not found"
+    },
+    {
+      "tool": "eslint",
+      "reason": "no eslint config found"
+    },
+    {
+      "tool": "cargo-clippy",
+      "reason": "Cargo.toml not found"
+    },
+    {
+      "tool": "go-vet",
+      "reason": "go.mod not found"
+    },
+    {
+      "tool": "golangci-lint",
+      "reason": "go.mod not found"
+    }
+  ]
+}

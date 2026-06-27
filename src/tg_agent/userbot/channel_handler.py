@@ -5,6 +5,7 @@ and auto-sends personalized outreach DMs to contacts found in posts.
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -13,6 +14,9 @@ from tg_agent.agent.llm import LLMClient
 from tg_agent.config import Settings
 from tg_agent.control_bot import ControlBot
 from tg_agent.logging import get_logger
+from tg_agent.policy.modes import ChatMode
+from tg_agent.storage.models import ChatSettings
+from tg_agent.storage.repositories import ChatSettingsRepo
 
 logger = get_logger(__name__)
 
@@ -33,11 +37,13 @@ class ChannelHandler:
         settings: Settings,
         client: TelegramClient,
         control_bot: ControlBot,
+        db,  # Database instance for updating chat settings
         llm_client: LLMClient | None = None,
     ):
         self.settings = settings
         self.client = client
         self.control_bot = control_bot
+        self.db = db
         self.llm_client = llm_client
         self._contacted_path = Path("data/contacted.json")
         self._contacted: set[str] = self._load_contacted()
@@ -111,9 +117,41 @@ class ChannelHandler:
                 continue
 
             try:
-                await self.client.send_message(username, resp.content)
+                sent_message = await self.client.send_message(username, resp.content)
+                chat_id = sent_message.chat_id
+                
                 self._contacted.add(username.lower())
                 self._save_contacted()
-                logger.info(f"Outreach: sent to @{username}: {resp.content!r}")
+                
+                # Set AUTO mode + trusted for this chat so bot can auto-reply to responses
+                logger.info(f"Outreach: saving AUTO+trusted settings for chat_id={chat_id}")
+                with self.db.get_sync_session() as session:
+                    chat_repo = ChatSettingsRepo(session)
+                    # Create or get settings with AUTO mode and trusted=True from the start
+                    chat = chat_repo.get_by_chat_id(chat_id)
+                    if chat is None:
+                        # Create new with correct settings
+                        chat = ChatSettings(
+                            chat_id=chat_id,
+                            mode=ChatMode.AUTO,
+                            is_trusted=True,
+                            chat_title=username,
+                        )
+                        session.add(chat)
+                        session.commit()
+                        session.refresh(chat)
+                        logger.info(f"Outreach: CREATED chat {chat_id} with mode=AUTO, trusted=True")
+                    else:
+                        # Update existing
+                        old_mode = chat.mode
+                        old_trusted = chat.is_trusted
+                        chat.mode = ChatMode.AUTO
+                        chat.is_trusted = True
+                        chat.updated_at = datetime.utcnow()
+                        session.commit()
+                        session.refresh(chat)
+                        logger.info(f"Outreach: UPDATED chat {chat_id}: mode {old_mode.value}→AUTO, trusted {old_trusted}→True")
+
+                logger.info(f"Outreach: sent to @{username}: {resp.content!r} (chat {chat_id} set to AUTO+trusted)")
             except Exception as e:
                 logger.warning(f"Outreach: failed to send to @{username}: {e}")

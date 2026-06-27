@@ -28,9 +28,9 @@ class MessageFilter:
 
     # Patterns indicating commitments/meetings
     COMMITMENT_PATTERNS = [
-        r"(встретимся|встреча|свидание|совещание|звонок|созвон)",
-        r"(завтра|сегодня|в\s+\d+:\d+|в\s+\d+\s*часов?)",
-        r"(обещаю|гарантирую|договорились|ок|договор)",
+        r"(встретимся|встреча|совещание|созвон)",
+        r"(в\s+\d+:\d+|в\s+\d+\s*часов?)",
+        r"(обещаю|гарантирую|договорились)",
     ]
 
     # Patterns indicating personal data

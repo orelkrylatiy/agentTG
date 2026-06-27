@@ -74,20 +74,19 @@ class PromptManager:
 
         return self._safety_prompt
 
+    @property
+    def persona(self) -> str:
+        """Always reload persona from file so edits take effect without restart."""
+        return self._load_prompt_file("persona.ru.txt")
+
     def get_full_system_prompt(self) -> str:
-        """
-        Get combined system and safety prompt.
-
-        Returns:
-            Combined prompt text.
-        """
-        system = self.system_prompt
-        safety = self.safety_prompt
-
-        if safety:
-            return f"{system}\n\n{safety}"
-
-        return system
+        """Get combined system + persona + safety prompt."""
+        parts = [self.system_prompt]
+        if persona := self.persona:
+            parts.append(persona)
+        if safety := self.safety_prompt:
+            parts.append(safety)
+        return "\n\n".join(parts)
 
     def format_context_messages(
         self,

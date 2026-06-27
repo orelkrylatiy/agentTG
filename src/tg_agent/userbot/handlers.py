@@ -188,6 +188,13 @@ class IncomingMessageHandler:
                 last_message_sender_id=previous_sender_id,
             )
 
+            # Log chat settings for debugging AUTO mode issues
+            logger.info(
+                f"Chat {chat_id}: mode={chat_settings.mode.value}, "
+                f"trusted={chat_settings.is_trusted}, "
+                f"policy_action={decision.action}, requires_approval={decision.requires_approval}"
+            )
+
             message_log_repo.create(
                 chat_id=chat_id,
                 message_id=message.id,

@@ -29,6 +29,7 @@ def setup_control_handlers(
     db: Database,
     control_bot: ControlBot,
     userbot_client: TelegramClient | None = None,
+    channel_handler=None,
 ) -> None:
     """
     Set up all control bot command handlers.
@@ -98,6 +99,13 @@ def setup_control_handlers(
     async def style_handler(message: types.Message) -> None:
         await cmd_style(message, settings)
 
+    @router.message(Command("persona"))
+    async def persona_handler(
+        message: types.Message,
+        command: CommandObject | None = None,
+    ) -> None:
+        await cmd_persona(message, settings, _command_args(command))
+
     @router.message(Command("help"))
     async def help_handler(message: types.Message) -> None:
         await cmd_help(message)
@@ -107,7 +115,7 @@ def setup_control_handlers(
         message: types.Message,
         command: CommandObject | None = None,
     ) -> None:
-        await cmd_scan_channel(message, settings, control_bot, userbot_client, _command_args(command))
+        await cmd_scan_channel(message, settings, control_bot, userbot_client, _command_args(command), channel_handler)
 
     dp.include_router(router)
 
@@ -221,7 +229,7 @@ async def cmd_mode(message: types.Message, db: Database, args: str) -> None:
     parts = args.strip().split()
     if len(parts) < 2:
         await message.answer(
-            "❌ Usage: /mode <chat_id_or_title> <OFF|WATCH|DRAFT|AUTO>\n"
+            "❌ Usage: /mode &lt;chat_id_or_title&gt; &lt;OFF|WATCH|DRAFT|AUTO&gt;\n"
             "Example: /mode 12345 DRAFT"
         )
         return
@@ -269,7 +277,7 @@ async def cmd_trust(message: types.Message, db: Database, args: str) -> None:
     """Handle /trust command."""
     chat_identifier = args.strip()
     if not chat_identifier:
-        await message.answer("❌ Usage: /trust <chat_id_or_title>")
+        await message.answer("❌ Usage: /trust &lt;chat_id_or_title&gt;")
         return
 
     with db.get_sync_session() as session:
@@ -297,7 +305,7 @@ async def cmd_untrust(message: types.Message, db: Database, args: str) -> None:
     """Handle /untrust command."""
     chat_identifier = args.strip()
     if not chat_identifier:
-        await message.answer("❌ Usage: /untrust <chat_id_or_title>")
+        await message.answer("❌ Usage: /untrust &lt;chat_id_or_title&gt;")
         return
 
     with db.get_sync_session() as session:
@@ -326,7 +334,7 @@ async def cmd_send(message: types.Message, db: Database, args: str, control_bot:
     # Parse: /send <chat_id> <message>
     parts = args.strip().split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("❌ Usage: /send <chat_id> <message text>")
+        await message.answer("❌ Usage: /send &lt;chat_id&gt; &lt;message text&gt;")
         return
 
     chat_identifier = parts[0]
@@ -410,14 +418,30 @@ async def cmd_style(message: types.Message, settings: Settings) -> None:
     await message.answer(text, parse_mode="HTML")
 
 
+async def cmd_persona(message: types.Message, settings: Settings, args: str) -> None:
+    """Handle /persona [text] — view or update the persona prompt."""
+    persona_file = settings.prompts_dir / "persona.ru.txt"
+    if args:
+        persona_file.write_text(args.strip(), encoding="utf-8")
+        await message.answer("✅ Персона обновлена. Вступает в силу сразу, без рестарта.")
+    else:
+        current = persona_file.read_text(encoding="utf-8").strip() if persona_file.exists() else "(не задана)"
+        await message.answer(
+            f"👤 <b>Текущая персона:</b>\n<pre>{current}</pre>\n\n"
+            "Чтобы изменить: <code>/persona Меня зовут ...</code>",
+            parse_mode="HTML",
+        )
+
+
 async def cmd_scan_channel(
     message: types.Message,
     settings: Settings,
     control_bot: ControlBot,
     client: TelegramClient | None,
     args: str,
+    channel_handler=None,
 ) -> None:
-    """Handle /scan_channel [limit] — fetch recent posts from monitored channels."""
+    """Handle /scan_channel [limit] — fetch recent posts and run outreach."""
     if not client:
         await message.answer("❌ Userbot client not available.")
         return
@@ -432,9 +456,14 @@ async def cmd_scan_channel(
     except Exception:
         limit = 10
 
-    await message.answer(f"🔍 Scanning {len(channel_ids)} channel(s), last {limit} posts...")
+    do_outreach = channel_handler is not None and channel_handler.llm_client is not None
+    await message.answer(
+        f"🔍 Сканирую {len(channel_ids)} канал(ов), последние {limit} постов"
+        + (" + запущу аутрич по новым контактам" if do_outreach else "") + "..."
+    )
 
     total = 0
+    outreach_count = 0
     for channel_id in channel_ids:
         try:
             msgs = await client.get_messages(channel_id, limit=limit)
@@ -456,10 +485,19 @@ async def cmd_scan_channel(
                     parse_mode="HTML",
                 )
                 total += 1
-        except Exception as e:
-            await message.answer(f"❌ Error scanning {channel_id}: {e}")
 
-    await message.answer(f"✅ Готово — переслано {total} постов.")
+                if do_outreach:
+                    before = len(channel_handler._contacted)
+                    await channel_handler._try_outreach(msg.text)
+                    outreach_count += len(channel_handler._contacted) - before
+
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сканировании {channel_id}: {e}")
+
+    summary = f"✅ Переслано {total} постов."
+    if do_outreach:
+        summary += f" Написал {outreach_count} новым контактам."
+    await message.answer(summary)
 
 
 async def cmd_help(message: types.Message) -> None:

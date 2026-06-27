@@ -156,32 +156,11 @@ class PolicyGate:
                     reason="In cooldown period",
                 )
 
-            # Check for sensitive topics
-            if requires_review:
-                return PolicyDecision(
-                    should_process=True,
-                    action="draft",
-                    reason=f"Sensitive topics detected: {', '.join(review_reasons)}",
-                    requires_approval=True,
-                )
-
-            # In AUTO mode initiative check is skipped — user set AUTO explicitly
-            if False and (
-                is_initiative
-                and self.settings.require_approval_for_initiative_messages
-            ):
-                return PolicyDecision(
-                    should_process=True,
-                    action="draft",
-                    reason="Initiative message requires approval",
-                    requires_approval=True,
-                )
-
-            # All checks passed - can auto-reply
+            # AUTO = always reply, no gating on sensitive topics or trust
             return PolicyDecision(
                 should_process=True,
                 action="auto_reply",
-                reason="AUTO mode, trusted chat, no restrictions",
+                reason="AUTO mode",
                 requires_approval=False,
             )
 
