@@ -4,8 +4,10 @@ Incoming message handlers for Telethon userbot.
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 from telethon import TelegramClient, events
+from telethon.tl.types import Channel, Chat
 from telethon.tl.types import Message
 
 from tg_agent.agent.llm import LLMClient
@@ -15,7 +17,7 @@ from tg_agent.control_bot import ControlBot
 from tg_agent.logging import get_logger
 from tg_agent.policy.cooldown import CooldownManager
 from tg_agent.policy.filters import MessageFilter
-from tg_agent.policy.gate import PolicyGate
+from tg_agent.policy.gate import PolicyDecision, PolicyGate
 from tg_agent.storage.db import Database
 from tg_agent.storage.models import ChatMode, MessageDirection
 from tg_agent.storage.repositories import (
@@ -74,6 +76,9 @@ class IncomingMessageHandler:
         self._pending: dict[int, list] = defaultdict(list)
         self._timers: dict[int, asyncio.Task] = {}
         self._debounce_seconds = 3.0
+        self._processing_messages: set[tuple[int, int]] = set()
+        self._processing_lock = asyncio.Lock()
+        self._me_id: int | None = None
 
     def register_handlers(self) -> None:
         """Register event handlers with the client."""
@@ -95,35 +100,14 @@ class IncomingMessageHandler:
         chat_id = event.chat_id
         sender_id = event.sender_id
 
-        if message.out:
+        if not await self._passes_early_filters(
+            message=message,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            chat_obj=getattr(event, "chat", None),
+            sender_obj=getattr(event, "sender", None),
+        ):
             return
-        if event.sender and getattr(event.sender, "bot", False):
-            return
-
-        control_bot_id = int(self.settings.control_bot_token.split(":")[0])
-        if chat_id == control_bot_id or sender_id == control_bot_id:
-            return
-
-        from telethon.tl.types import Chat, Channel
-        _sender_obj = getattr(event, "sender", None)
-        if isinstance(_sender_obj, Channel) and not getattr(_sender_obj, "megagroup", False):
-            return
-
-        _chat_obj = getattr(event, "chat", None)
-        is_group = (
-            isinstance(_chat_obj, (Chat, Channel)) and getattr(_chat_obj, "megagroup", False)
-            or isinstance(_chat_obj, Chat)
-        )
-        if is_group:
-            me = await event.client.get_me()
-            mentioned = message.mentioned
-            reply_to_self = (
-                message.reply_to
-                and hasattr(message.reply_to, "reply_to_msg_id")
-                and await self._is_reply_to_self(event, me.id)
-            )
-            if not mentioned and not reply_to_self:
-                return
 
         # Passed all filters — debounce
         self._pending[chat_id].append(event)
@@ -149,77 +133,133 @@ class IncomingMessageHandler:
         await self._handle_message(last_event)
 
     async def _handle_message(self, event: events.NewMessage) -> None:
-        message = event.message
-        chat_id = event.chat_id
-        sender_id = event.sender_id
+        await self._handle_message_object(
+            message=event.message,
+            chat_id=event.chat_id,
+            sender_id=event.sender_id,
+            chat_obj=getattr(event, "chat", None),
+        )
 
-        logger.info(f"New message in chat {chat_id} from {sender_id}")
+    async def _handle_message_object(
+        self,
+        message: Message,
+        chat_id: int,
+        sender_id: int | None,
+        *,
+        chat_obj=None,
+        is_catchup: bool = False,
+    ) -> bool:
+        message_id = getattr(message, "id", None)
+        if message_id is None:
+            return False
 
-        # Mark message as read
+        key = (chat_id, message_id)
+        async with self._processing_lock:
+            if key in self._processing_messages:
+                logger.info(f"Skipping duplicate in-flight message {message_id} in chat {chat_id}")
+                return False
+            self._processing_messages.add(key)
+
         try:
-            await self.client.send_read_acknowledge(chat_id, max_id=message.id)
-        except Exception:
-            pass
+            source = "catch-up" if is_catchup else "live"
+            logger.info(f"Processing {source} message {message_id} in chat {chat_id} from {sender_id}")
 
-        try:
-            _chat = await event.get_chat()
-        except Exception:
-            _chat = getattr(event, "chat", None)
-        chat_title = getattr(_chat, "title", None) or " ".join(filter(None, [
-            getattr(_chat, "first_name", None),
-            getattr(_chat, "last_name", None),
-        ])) or None
-        with self.db.get_sync_session() as session:
-            chat_settings_repo = ChatSettingsRepo(session)
-            message_log_repo = MessageLogRepo(session)
-            previous_sender_id = message_log_repo.get_previous_sender_id(chat_id)
+            # Mark message as read
+            try:
+                await self.client.send_read_acknowledge(chat_id, max_id=message.id)
+            except Exception:
+                pass
 
-            default_mode = ChatMode(self.settings.default_chat_mode)
-            chat_settings = chat_settings_repo.get_or_create(
-                chat_id=chat_id,
-                default_mode=default_mode,
-                chat_title=chat_title,
-            )
+            resolved_chat = chat_obj
+            if resolved_chat is None:
+                try:
+                    resolved_chat = await message.get_chat()
+                except Exception:
+                    resolved_chat = None
 
-            decision = self.policy_gate.evaluate(
-                chat_settings=chat_settings,
-                sender_id=sender_id or 0,
-                message_text=message.text or "",
-                last_message_sender_id=previous_sender_id,
-            )
+            chat_title = getattr(resolved_chat, "title", None) or " ".join(
+                filter(
+                    None,
+                    [
+                        getattr(resolved_chat, "first_name", None),
+                        getattr(resolved_chat, "last_name", None),
+                    ],
+                )
+            ) or None
 
-            # Log chat settings for debugging AUTO mode issues
-            logger.info(
-                f"Chat {chat_id}: mode={chat_settings.mode.value}, "
-                f"trusted={chat_settings.is_trusted}, "
-                f"policy_action={decision.action}, requires_approval={decision.requires_approval}"
-            )
+            with self.db.get_sync_session() as session:
+                chat_settings_repo = ChatSettingsRepo(session)
+                message_log_repo = MessageLogRepo(session)
+                previous_sender_id = message_log_repo.get_previous_sender_id(chat_id)
 
-            message_log_repo.create(
-                chat_id=chat_id,
-                message_id=message.id,
-                sender_id=sender_id,
-                direction=MessageDirection.INCOMING,
-                text=message.text,
-            )
-            chat_settings_repo.update_last_message(chat_id, message.id)
+                default_mode = ChatMode(self.settings.default_chat_mode)
+                chat_settings = chat_settings_repo.get_or_create(
+                    chat_id=chat_id,
+                    default_mode=default_mode,
+                    chat_title=chat_title,
+                )
 
-            logger.info(
-                f"Policy decision for chat {chat_id}: {decision.action} - {decision.reason}"
-            )
-            # Extract needed fields before session closes
-            chat_id_val = chat_settings.chat_id
-            chat_title_val = chat_settings.chat_title
+                if message_log_repo.exists(
+                    chat_id=chat_id,
+                    message_id=message.id,
+                    direction=MessageDirection.INCOMING,
+                ):
+                    logger.info(f"Skipping already logged message {message.id} in chat {chat_id}")
+                    return False
 
-        if decision.action == "ignore":
-            return
+                if (
+                    chat_settings.last_incoming_message_id is not None
+                    and message.id <= chat_settings.last_incoming_message_id
+                ):
+                    logger.info(
+                        f"Skipping stale message {message.id} in chat {chat_id}; "
+                        f"last seen is {chat_settings.last_incoming_message_id}"
+                    )
+                    return False
 
-        if decision.action == "notify":
-            await self._handle_watch_mode(message, chat_id_val, chat_title_val, sender_id)
-        elif decision.action == "draft":
-            await self._handle_draft_mode(message, chat_id_val, chat_title_val, sender_id)
-        elif decision.action == "auto_reply":
-            await self._handle_auto_reply(message, chat_id_val)
+                decision = self.policy_gate.evaluate(
+                    chat_settings=chat_settings,
+                    sender_id=sender_id or 0,
+                    message_text=message.text or "",
+                    last_message_sender_id=previous_sender_id,
+                )
+                if is_catchup:
+                    decision = self._normalize_catchup_decision(decision, message)
+
+                logger.info(
+                    f"Chat {chat_id}: mode={chat_settings.mode.value}, "
+                    f"trusted={chat_settings.is_trusted}, "
+                    f"policy_action={decision.action}, requires_approval={decision.requires_approval}"
+                )
+
+                message_log_repo.create(
+                    chat_id=chat_id,
+                    message_id=message.id,
+                    sender_id=sender_id,
+                    direction=MessageDirection.INCOMING,
+                    text=message.text,
+                )
+                chat_settings_repo.update_last_message(chat_id, message.id)
+
+                logger.info(
+                    f"Policy decision for chat {chat_id}: {decision.action} - {decision.reason}"
+                )
+                chat_id_val = chat_settings.chat_id
+                chat_title_val = chat_settings.chat_title
+
+            if decision.action == "ignore":
+                return False
+
+            if decision.action == "notify":
+                await self._handle_watch_mode(message, chat_id_val, chat_title_val, sender_id)
+            elif decision.action == "draft":
+                await self._handle_draft_mode(message, chat_id_val, chat_title_val, sender_id)
+            elif decision.action == "auto_reply":
+                await self._handle_auto_reply(message, chat_id_val)
+            return True
+        finally:
+            async with self._processing_lock:
+                self._processing_messages.discard(key)
 
     async def _handle_watch_mode(
         self,
@@ -318,13 +358,178 @@ class IncomingMessageHandler:
 
             logger.info(f"Auto-reply sent to chat {chat_id}")
 
-    async def _is_reply_to_self(self, event, my_id: int) -> bool:
+    async def catch_up_missed_messages(self) -> int:
+        """Process the latest missed relevant message per recent dialog."""
+        if not self.settings.startup_catchup_enabled:
+            logger.info("Startup catch-up disabled")
+            return 0
+
+        logger.info("Starting startup catch-up sync...")
+        processed = 0
+        dialogs = await self.client.get_dialogs(
+            limit=self.settings.startup_catchup_dialog_limit
+        )
+
+        for dialog in dialogs:
+            try:
+                if await self._catch_up_dialog(dialog):
+                    processed += 1
+            except Exception as e:
+                logger.exception(
+                    f"Failed to catch up dialog {getattr(dialog, 'id', None)}: {e}"
+                )
+
+        logger.info(f"Startup catch-up finished: processed {processed} dialog(s)")
+        return processed
+
+    async def _catch_up_dialog(self, dialog) -> bool:
+        chat_id = getattr(dialog, "id", None)
+        if chat_id is None:
+            return False
+
+        unread_count = int(getattr(dialog, "unread_count", 0) or 0)
+        latest_message = getattr(dialog, "message", None)
+        latest_message_id = getattr(latest_message, "id", 0) or 0
+
+        with self.db.get_sync_session() as session:
+            chat_settings = ChatSettingsRepo(session).get_by_chat_id(chat_id)
+            last_seen_id = chat_settings.last_incoming_message_id if chat_settings else None
+
+        should_sync = unread_count > 0 or (
+            last_seen_id is not None and latest_message_id > last_seen_id
+        )
+        if not should_sync:
+            return False
+
+        fetch_kwargs = {
+            "entity": dialog.entity,
+            "limit": self.settings.startup_catchup_messages_per_chat,
+        }
+        if last_seen_id:
+            fetch_kwargs["min_id"] = last_seen_id
+
+        messages = await self.client.get_messages(**fetch_kwargs)
+        if not messages:
+            return False
+
+        target_message = None
+        target_chat = None
+        for message in messages:
+            if message is None:
+                continue
+            if last_seen_id is not None and message.id <= last_seen_id:
+                continue
+            chat_obj = await message.get_chat()
+            sender_obj = await message.get_sender()
+            if not await self._passes_early_filters(
+                message=message,
+                chat_id=chat_id,
+                sender_id=getattr(message, "sender_id", None),
+                chat_obj=chat_obj,
+                sender_obj=sender_obj,
+            ):
+                continue
+            if target_message is None or message.id > target_message.id:
+                target_message = message
+                target_chat = chat_obj
+
+        if target_message is None:
+            return False
+
+        return await self._handle_message_object(
+            message=target_message,
+            chat_id=chat_id,
+            sender_id=getattr(target_message, "sender_id", None),
+            chat_obj=target_chat,
+            is_catchup=True,
+        )
+
+    async def _passes_early_filters(
+        self,
+        *,
+        message: Message,
+        chat_id: int | None,
+        sender_id: int | None,
+        chat_obj,
+        sender_obj,
+    ) -> bool:
+        """Apply the same coarse Telegram-side filters for live and catch-up paths."""
+        if chat_id is None or message.out:
+            return False
+        if sender_obj and getattr(sender_obj, "bot", False):
+            return False
+
+        control_bot_id = int(self.settings.control_bot_token.split(":")[0])
+        if chat_id == control_bot_id or sender_id == control_bot_id:
+            return False
+
+        if isinstance(sender_obj, Channel) and not getattr(sender_obj, "megagroup", False):
+            return False
+
+        is_group = (
+            isinstance(chat_obj, (Chat, Channel)) and getattr(chat_obj, "megagroup", False)
+        ) or isinstance(chat_obj, Chat)
+        if is_group:
+            me_id = await self._get_me_id()
+            mentioned = bool(getattr(message, "mentioned", False))
+            reply_to_self = (
+                message.reply_to
+                and hasattr(message.reply_to, "reply_to_msg_id")
+                and await self._is_reply_to_self_message(message, me_id)
+            )
+            if not mentioned and not reply_to_self:
+                return False
+
+        return True
+
+    async def _get_me_id(self) -> int:
+        if self._me_id is None:
+            me = await self.client.get_me()
+            self._me_id = me.id
+        return self._me_id
+
+    async def _is_reply_to_self_message(self, message: Message, my_id: int) -> bool:
         """Check if message is a reply to one of our messages."""
         try:
-            replied = await event.message.get_reply_message()
+            replied = await message.get_reply_message()
             return replied is not None and replied.sender_id == my_id
         except Exception:
             return False
+
+    def _normalize_catchup_decision(
+        self,
+        decision: PolicyDecision,
+        message: Message,
+    ) -> PolicyDecision:
+        """Avoid automatic replies to stale startup backlog messages."""
+        if decision.action != "auto_reply":
+            return decision
+
+        message_date = getattr(message, "date", None)
+        if message_date is None:
+            return PolicyDecision(
+                should_process=True,
+                action="draft",
+                reason="Catch-up message without timestamp requires approval",
+                requires_approval=True,
+            )
+
+        max_age = timedelta(
+            minutes=self.settings.startup_catchup_auto_reply_max_age_minutes
+        )
+        now = datetime.now(timezone.utc)
+        if message_date.tzinfo is None:
+            message_date = message_date.replace(tzinfo=timezone.utc)
+
+        if now - message_date <= max_age:
+            return decision
+
+        return PolicyDecision(
+            should_process=True,
+            action="draft",
+            reason="Stale catch-up message requires approval",
+            requires_approval=True,
+        )
 
     async def _get_context_messages(
         self,

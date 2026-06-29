@@ -13,6 +13,7 @@ from tg_agent.storage.repositories import (
     ChatSettingsRepo,
     GlobalStateRepo,
     MessageLogRepo,
+    MonitoredChannelRepo,
     PendingActionRepo,
 )
 
@@ -105,6 +106,24 @@ def setup_control_handlers(
         command: CommandObject | None = None,
     ) -> None:
         await cmd_persona(message, settings, _command_args(command))
+
+    @router.message(Command("channels"))
+    async def channels_handler(message: types.Message) -> None:
+        await cmd_channels(message, settings, db)
+
+    @router.message(Command("add_channel"))
+    async def add_channel_handler(
+        message: types.Message,
+        command: CommandObject | None = None,
+    ) -> None:
+        await cmd_add_channel(message, settings, userbot_client, db, _command_args(command))
+
+    @router.message(Command("remove_channel"))
+    async def remove_channel_handler(
+        message: types.Message,
+        command: CommandObject | None = None,
+    ) -> None:
+        await cmd_remove_channel(message, settings, db, _command_args(command))
 
     @router.message(Command("help"))
     async def help_handler(message: types.Message) -> None:
@@ -510,16 +529,169 @@ async def cmd_help(message: types.Message) -> None:
         "  /resume - Resume agent\n\n"
         "💬 <b>Chats:</b>\n"
         "  /chats - List configured chats\n"
-        "  /mode <chat> <mode> - Set chat mode (OFF/WATCH/DRAFT/AUTO)\n"
-        "  /trust <chat> - Mark chat as trusted\n"
-        "  /untrust <chat> - Remove trusted status\n\n"
+        "  /mode &lt;chat&gt; &lt;mode&gt; - Set chat mode (OFF/WATCH/DRAFT/AUTO)\n"
+        "  /trust &lt;chat&gt; - Mark chat as trusted\n"
+        "  /untrust &lt;chat&gt; - Remove trusted status\n\n"
         "✏️ <b>Actions:</b>\n"
-        "  /send <chat> <msg> - Send message (requires approval)\n"
+        "  /send &lt;chat&gt; &lt;msg&gt; - Send message (requires approval)\n"
         "  /recent - Show recent actions\n\n"
         "📢 <b>Каналы:</b>\n"
+        "  /channels - Список отслеживаемых каналов\n"
+        "  /add_channel &lt;link|username&gt; [outreach] - Добавить канал\n"
+        "  /remove_channel &lt;channel_id&gt; - Удалить канал\n"
         "  /scan_channel [N] - Последние N постов из каналов (по умолч. 10)\n\n"
         "⚙️ <b>Settings:</b>\n"
         "  /style - Show prompt configuration\n"
         "  /help - This help message"
     )
     await message.answer(text, parse_mode="HTML")
+
+
+async def cmd_channels(message: types.Message, settings: Settings, db: Database) -> None:
+    """Handle /channels command - list monitored channels."""
+    with db.get_sync_session() as session:
+        repo = MonitoredChannelRepo(session)
+        channels = repo.get_all()
+    
+    if not channels:
+        await message.answer(
+            "📢 <b>Нет отслеживаемых каналов</b>\n\n"
+            "Добавьте канал командой:\n"
+            "  /add_channel &lt;ссылка_или_юзернейм&gt; [outreach]\n\n"
+            "Примеры:\n"
+            "  /add_channel @it_jobs\n"
+            "  /add_channel https://t.me/+ucoAOCsXCwk3ZmFi outreach",
+            parse_mode="HTML"
+        )
+        return
+    
+    text = "📢 <b>Отслеживаемые каналы:</b>\n\n"
+    for i, ch in enumerate(channels, 1):
+        outreach_icon = "📤" if ch.auto_outreach else "👁️"
+        enabled_icon = "✅" if ch.enabled else "❌"
+        text += f"{i}. <code>{ch.channel_id}</code> — {ch.channel_title or 'Без названия'}\n"
+        text += f"   {enabled_icon} {outreach_icon} Outreach: {'✅' if ch.auto_outreach else '❌'}\n"
+        if ch.keywords:
+            text += f"   🔑 Keywords: {ch.keywords}\n"
+        text += "\n"
+    
+    text += f"\nВсего: {len(channels)} канал(ов)"
+    await message.answer(text, parse_mode="HTML")
+
+
+async def cmd_add_channel(
+    message: types.Message,
+    settings: Settings,
+    userbot_client: TelegramClient,
+    db: Database,
+    args: str
+) -> None:
+    """Handle /add_channel command - add channel by link or username."""
+    if not args:
+        await message.answer(
+            "❌ <b>Укажите ссылку или юзернейм канала</b>\n\n"
+            "Примеры:\n"
+            "  /add_channel @it_jobs\n"
+            "  /add_channel https://t.me/+ucoAOCsXCwk3ZmFi\n"
+            "  /add_channel @design_jobs outreach",
+            parse_mode="HTML"
+        )
+        return
+    
+    parts = args.split(maxsplit=1)
+    channel_input = parts[0]
+    enable_outreach = len(parts) > 1 and parts[1].lower() == "outreach"
+    
+    status_msg = await message.answer("⏳ Ищу канал...", parse_mode="HTML")
+    
+    try:
+        # Get channel info via Telethon
+        entity = await userbot_client.get_entity(channel_input)
+        
+        # Extract channel ID
+        channel_id = entity.id
+        if hasattr(channel_id, 'channel_id'):
+            channel_id = channel_id.channel_id
+        
+        # Convert to superchannel format if needed
+        if isinstance(channel_id, int) and channel_id > 0:
+            channel_id = int(f"-100{channel_id}")
+        
+        channel_title = getattr(entity, 'title', 'Unknown')
+        username = getattr(entity, 'username', None)
+        
+        # Save to database
+        with db.get_sync_session() as session:
+            repo = MonitoredChannelRepo(session)
+            repo.add(
+                channel_id=channel_id,
+                channel_title=channel_title,
+                auto_outreach=enable_outreach,
+            )
+        
+        await status_msg.edit_text(
+            f"✅ <b>Канал добавлен!</b>\n\n"
+            f"📢 <b>Название:</b> {channel_title}\n"
+            f"🆔 <b>ID:</b> <code>{channel_id}</code>\n"
+            f"📤 <b>Outreach:</b> {'✅ Включён' if enable_outreach else '❌ Выключен'}\n\n"
+            f"⚡ <b>Изменения применены немедленно!</b>",
+            parse_mode="HTML"
+        )
+        
+    except ValueError as e:
+        await status_msg.edit_text(
+            f"❌ <b>Канал не найден</b>\n\n"
+            f"Убедитесь, что вы подписаны на этот канал.\n"
+            f"Ошибка: {e}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await status_msg.edit_text(
+            f"❌ <b>Ошибка:</b> {e}",
+            parse_mode="HTML"
+        )
+
+
+async def cmd_remove_channel(
+    message: types.Message,
+    settings: Settings,
+    db: Database,
+    args: str
+) -> None:
+    """Handle /remove_channel command - remove channel by ID."""
+    if not args:
+        await message.answer(
+            "❌ <b>Укажите ID канала</b>\n\n"
+            "Пример:\n"
+            "  /remove_channel -1001782596777\n\n"
+            "Используйте /channels чтобы увидеть список.",
+            parse_mode="HTML"
+        )
+        return
+    
+    try:
+        channel_id = int(args)
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат ID. Должно быть число (например, -1001782596777)",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Remove from database
+    with db.get_sync_session() as session:
+        repo = MonitoredChannelRepo(session)
+        removed = repo.remove(channel_id)
+    
+    if removed:
+        await message.answer(
+            f"✅ <b>Канал удалён!</b>\n\n"
+            f"🆔 <b>ID:</b> <code>{channel_id}</code>\n\n"
+            f"⚡ <b>Изменения применены немедленно!</b>",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            f"❌ Канал {channel_id} не найден в базе",
+            parse_mode="HTML"
+        )

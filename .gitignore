@@ -41,8 +41,12 @@ ENV/
 # Session files (Telethon)
 *.session
 *.session-journal
+*.session-shm
+*.session-wal
 data/*.session
 data/*.session-journal
+data/*.session-shm
+data/*.session-wal
 
 # Database
 *.db

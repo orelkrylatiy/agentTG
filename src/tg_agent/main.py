@@ -92,13 +92,16 @@ class Agent:
         hitl_manager.register_handlers(self.control_bot.dispatcher)
 
         # Setup incoming message handlers
-        setup_incoming_handlers(
+        incoming_handler = setup_incoming_handlers(
             settings=self.settings,
             db=self.db,
             client=self.userbot.client,
             control_bot=self.control_bot,
             llm_client=self.llm_client,
         )
+        catch_up_count = await incoming_handler.catch_up_missed_messages()
+        if catch_up_count:
+            logger.info(f"Startup catch-up processed {catch_up_count} dialog(s)")
 
         # Setup channel monitoring
         channel_handler = ChannelHandler(

@@ -2,6 +2,8 @@
 Application configuration using pydantic-settings.
 """
 
+from __future__ import annotations
+
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -10,6 +12,10 @@ from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Deferred import to avoid circular dependency
+# ChannelConfig is only used in properties, not in the class definition
+from tg_agent.logging import get_logger
 
 
 class Settings(BaseSettings):
@@ -96,12 +102,22 @@ class Settings(BaseSettings):
     max_context_messages: int = Field(default=12, alias="MAX_CONTEXT_MESSAGES")
     max_reply_chars: int = Field(default=800, alias="MAX_REPLY_CHARS")
 
+    # Startup catch-up
+    startup_catchup_enabled: bool = Field(default=True, alias="STARTUP_CATCHUP_ENABLED")
+    startup_catchup_dialog_limit: int = Field(default=50, alias="STARTUP_CATCHUP_DIALOG_LIMIT")
+    startup_catchup_messages_per_chat: int = Field(
+        default=20, alias="STARTUP_CATCHUP_MESSAGES_PER_CHAT"
+    )
+    startup_catchup_auto_reply_max_age_minutes: int = Field(
+        default=15, alias="STARTUP_CATCHUP_AUTO_REPLY_MAX_AGE_MINUTES"
+    )
+
     # Channel monitoring
     monitored_channels: str = Field(default="", alias="MONITORED_CHANNELS")
 
     @property
     def monitored_channel_ids(self) -> list[int]:
-        """Parse MONITORED_CHANNELS into list of int IDs."""
+        """Parse MONITORED_CHANNELS into list of int IDs (legacy format)."""
         if not self.monitored_channels:
             return []
         result = []
@@ -109,10 +125,41 @@ class Settings(BaseSettings):
             part = part.strip()
             if part:
                 try:
-                    result.append(int(part))
+                    # Extract just the channel_id from spec string
+                    channel_id = int(part.split(":")[0])
+                    result.append(channel_id)
                 except ValueError:
                     pass
         return result
+
+    @property
+    def channel_configs(self) -> list[ChannelConfig]:
+        """Parse MONITORED_CHANNELS into list of ChannelConfig objects."""
+        from tg_agent.userbot.channel_config import ChannelConfig
+        
+        if not self.monitored_channels:
+            return []
+        result = []
+        for part in self.monitored_channels.split(","):
+            part = part.strip()
+            if part:
+                try:
+                    config = ChannelConfig.from_string(part)
+                    if config.enabled:
+                        result.append(config)
+                except ValueError as e:
+                    logger = get_logger(__name__)
+                    logger.warning(f"Skipping invalid channel config '{part}': {e}")
+        return result
+
+    def get_channel_config(self, channel_id: int) -> ChannelConfig | None:
+        """Get configuration for a specific channel by ID."""
+        from tg_agent.userbot.channel_config import ChannelConfig
+        
+        for config in self.channel_configs:
+            if config.channel_id == channel_id:
+                return config
+        return None
 
     # Safety settings
     require_approval_for_unknown_chats: bool = Field(

@@ -109,3 +109,20 @@ class GlobalState(SQLModel, table=True):
     key: str = Field(..., primary_key=True)
     value: str = Field(...)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+@model_dataclass
+class MonitoredChannel(SQLModel, table=True):
+    """Monitored channels configuration."""
+
+    __tablename__ = "monitored_channels"
+
+    id: int | None = Field(default=None, primary_key=True)
+    channel_id: int = Field(..., unique=True, index=True)
+    channel_title: str | None = Field(default=None)
+    enabled: bool = Field(default=True)
+    auto_outreach: bool = Field(default=False)
+    keywords: str | None = Field(default=None)  # comma-separated
+    max_posts_per_hour: int = Field(default=60)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

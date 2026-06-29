@@ -315,11 +315,14 @@ class LLMClient:
                 reasoning = getattr(details, "reasoning_tokens", 0) if details else 0
                 logger.info(f"Tokens: reasoning={reasoning}, completion={total}")
 
-            content = response.choices[0].message.content
+            message = response.choices[0].message
+            content = getattr(message, "content", None)
+            if not isinstance(content, str):
+                content = None
 
             if not content:
-                rc = getattr(response.choices[0].message, "reasoning_content", None)
-                if rc:
+                rc = getattr(message, "reasoning_content", None)
+                if isinstance(rc, str) and rc.strip():
                     content = rc
                 else:
                     return LLMResponse(

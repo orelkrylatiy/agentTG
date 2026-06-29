@@ -33,6 +33,7 @@ from tg_agent.storage.models import (
     GlobalState,
     MessageDirection,
     MessageLog,
+    MonitoredChannel,
     PendingAction,
 )
 
@@ -152,6 +153,21 @@ class MessageLogRepo:
         self.session.commit()
         self.session.refresh(log_entry)
         return log_entry
+
+    def exists(
+        self,
+        chat_id: int,
+        message_id: int,
+        direction: MessageDirection | None = None,
+    ) -> bool:
+        """Return True if a matching message log entry already exists."""
+        statement = select(MessageLog).where(
+            MessageLog.chat_id == chat_id,
+            MessageLog.message_id == message_id,
+        )
+        if direction is not None:
+            statement = statement.where(MessageLog.direction == direction)
+        return self.session.exec(statement.limit(1)).first() is not None
 
     def get_recent(self, chat_id: int, limit: int = 10) -> list[MessageLog]:
         """Get recent messages for a chat."""
@@ -317,3 +333,71 @@ class GlobalStateRepo:
     def set_bool(self, key: str, value: bool) -> GlobalState:
         """Set boolean value."""
         return self.set(key, "true" if value else "false")
+
+
+class MonitoredChannelRepo:
+    """Repository for monitored channels."""
+
+    def __init__(self, session: Session | AsyncSession):
+        self.session = session
+
+    def get_all(self) -> list[MonitoredChannel]:
+        """Get all monitored channels."""
+        return self.session.exec(select(MonitoredChannel).where(MonitoredChannel.enabled == True)).all()
+
+    def get_by_id(self, channel_id: int) -> MonitoredChannel | None:
+        """Get channel by ID."""
+        return self.session.exec(select(MonitoredChannel).where(MonitoredChannel.channel_id == channel_id)).first()
+
+    def add(
+        self,
+        channel_id: int,
+        channel_title: str | None = None,
+        auto_outreach: bool = False,
+        keywords: list[str] | None = None,
+    ) -> MonitoredChannel:
+        """Add or update monitored channel."""
+        existing = self.get_by_id(channel_id)
+        if existing:
+            existing.channel_title = channel_title
+            existing.auto_outreach = auto_outreach
+            existing.keywords = ",".join(keywords) if keywords else None
+            existing.updated_at = datetime.utcnow()
+            self.session.commit()
+            self.session.refresh(existing)
+            logger.info(f"Updated monitored channel {channel_id}")
+            return existing
+        else:
+            channel = MonitoredChannel(
+                channel_id=channel_id,
+                channel_title=channel_title,
+                auto_outreach=auto_outreach,
+                keywords=",".join(keywords) if keywords else None,
+            )
+            self.session.add(channel)
+            self.session.commit()
+            self.session.refresh(channel)
+            logger.info(f"Added monitored channel {channel_id}")
+            return channel
+
+    def remove(self, channel_id: int) -> bool:
+        """Remove monitored channel by ID. Returns True if removed."""
+        channel = self.get_by_id(channel_id)
+        if channel:
+            self.session.delete(channel)
+            self.session.commit()
+            logger.info(f"Removed monitored channel {channel_id}")
+            return True
+        logger.warning(f"Channel {channel_id} not found")
+        return False
+
+    def set_enabled(self, channel_id: int, enabled: bool) -> MonitoredChannel | None:
+        """Enable or disable a channel."""
+        channel = self.get_by_id(channel_id)
+        if channel:
+            channel.enabled = enabled
+            channel.updated_at = datetime.utcnow()
+            self.session.commit()
+            self.session.refresh(channel)
+            return channel
+        return None

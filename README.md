@@ -249,6 +249,85 @@ If all providers fail, the agent creates a draft with an error message for owner
 | `/recent` | Show recent agent actions |
 | `/style` | Show prompt configuration |
 | `/help` | Show help message |
+| `/scan_channel [N]` | Scan last N posts from monitored channels (default: 10) |
+
+## Channel Monitoring
+
+The agent can monitor Telegram channels for new posts, extract contact information, and automatically send personalized outreach messages.
+
+### Configuration
+
+Add channels to `.env`:
+
+```bash
+MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach,-1001234567890:Design:outreach:figma,ui"
+```
+
+**Format:** `channel_id[:Title][:outreach][:keyword1,keyword2]`
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `channel_id` | ✅ | Telegram channel ID (e.g., `-1001782596777`) |
+| `Title` | ❌ | Human-readable name for logging |
+| `outreach` | ❌ | Enable automatic DM to contacts |
+| `keywords` | ❌ | Filter posts by keywords (comma-separated) |
+
+### Examples
+
+**Monitor only (no auto-outreach):**
+```bash
+MONITORED_CHANNELS="-1001782596777:IT Jobs"
+```
+
+**Auto-outreach to all contacts:**
+```bash
+MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach"
+```
+
+**Auto-outreach with keyword filter:**
+```bash
+MONITORED_CHANNELS="-1001782596777:IT:outreach:python,frontend"
+```
+
+**Multiple channels:**
+```bash
+MONITORED_CHANNELS="-1001782596777:IT:outreach:python,-1001234567890:Design:outreach:figma"
+```
+
+### How It Works
+
+1. **Monitor**: Agent listens for new posts in configured channels
+2. **Extract**: Parses `@username` and `t.me/username` from post text
+3. **Generate**: Creates personalized message using LLM
+4. **Send**: Sends DM via your userbot account
+5. **Track**: Saves contacted usernames to `data/contacted.json` (no duplicates)
+
+### Manual Outreach
+
+Run one-time outreach scan:
+
+```bash
+# Scan last 10 posts from all configured channels
+python outreach.py 10
+
+# Scan specific channel
+python outreach.py 10 -1001782596777
+```
+
+### Rate Limiting
+
+Each channel has built-in rate limiting:
+- Default: 60 posts per hour maximum
+- Prevents spam and API limits
+- Configurable per channel via `max_posts_per_hour`
+
+### Finding Channel ID
+
+Use one of these methods:
+
+1. **Forward to @getmyidbot** — Forward a post from the channel, bot shows ID
+2. **Use the script** — Run `python get_channel_id.py`
+3. **Manual** — ID format is `-100` + 10 digits (e.g., `-1001782596777`)
 
 ## Chat Modes
 

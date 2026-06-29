@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover
 from tg_agent.logging import get_logger
 from tg_agent.storage.models import (
     GlobalState,
+    MonitoredChannel,
 )
 
 if TYPE_CHECKING:
@@ -114,8 +115,43 @@ class Database:
 
         # Initialize default global state
         self._init_default_state()
+        
+        # Migrate channels from .env to database if needed
+        self._migrate_channels_from_env()
 
         logger.info("Database initialized successfully")
+    
+    def _migrate_channels_from_env(self) -> None:
+        """Migrate MONITORED_CHANNELS from .env to database."""
+        from tg_agent.config import get_settings
+        from tg_agent.storage.repositories import MonitoredChannelRepo
+        
+        try:
+            settings = get_settings()
+            channel_configs = settings.channel_configs
+            
+            if not channel_configs:
+                return
+            
+            with self.get_sync_session() as session:
+                repo = MonitoredChannelRepo(session)
+                migrated = 0
+                
+                for cfg in channel_configs:
+                    existing = repo.get_by_id(cfg.channel_id)
+                    if not existing:
+                        repo.add(
+                            channel_id=cfg.channel_id,
+                            channel_title=cfg.title,
+                            auto_outreach=cfg.auto_outreach,
+                            keywords=cfg.keywords,
+                        )
+                        migrated += 1
+                
+                if migrated > 0:
+                    logger.info(f"Migrated {migrated} channel(s) from .env to database")
+        except Exception as e:
+            logger.warning(f"Failed to migrate channels from .env: {e}")
 
     def _init_default_state(self) -> None:
         """Initialize default global state entries."""

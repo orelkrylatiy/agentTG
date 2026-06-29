@@ -147,7 +147,6 @@ class PolicyGate:
             )
 
         if mode == ChatMode.AUTO:
-
             # Check cooldown
             if not self.cooldown_manager.can_reply(chat_settings.chat_id):
                 return PolicyDecision(
@@ -156,7 +155,39 @@ class PolicyGate:
                     reason="In cooldown period",
                 )
 
-            # AUTO = always reply, no gating on sensitive topics or trust
+            if (
+                self.settings.require_approval_for_unknown_chats
+                and not chat_settings.is_trusted
+            ):
+                return PolicyDecision(
+                    should_process=True,
+                    action="draft",
+                    reason="AUTO mode requires trusted chat",
+                    requires_approval=True,
+                )
+
+            if (
+                self.settings.require_approval_for_initiative_messages
+                and is_initiative
+            ):
+                return PolicyDecision(
+                    should_process=True,
+                    action="draft",
+                    reason="Initiative message requires approval",
+                    requires_approval=True,
+                )
+
+            if requires_review:
+                return PolicyDecision(
+                    should_process=True,
+                    action="draft",
+                    reason=(
+                        "Sensitive topic requires approval: "
+                        + ", ".join(review_reasons)
+                    ),
+                    requires_approval=True,
+                )
+
             return PolicyDecision(
                 should_process=True,
                 action="auto_reply",

@@ -72,7 +72,10 @@ class ControlBot:
             BotCommand(command="send",    description="Отправить сообщение вручную"),
             BotCommand(command="recent",  description="Последние сообщения"),
             BotCommand(command="style",        description="Стиль ответов"),
-            BotCommand(command="scan_channel", description="Последние посты из каналов"),
+            BotCommand(command="channels",     description="Список каналов"),
+            BotCommand(command="add_channel",  description="Добавить канал"),
+            BotCommand(command="remove_channel", description="Удалить канал"),
+            BotCommand(command="scan_channel", description="Сканировать каналы"),
             BotCommand(command="help",         description="Помощь"),
         ])
 

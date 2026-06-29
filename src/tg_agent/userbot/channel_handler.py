@@ -5,7 +5,7 @@ and auto-sends personalized outreach DMs to contacts found in posts.
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -17,6 +17,7 @@ from tg_agent.logging import get_logger
 from tg_agent.policy.modes import ChatMode
 from tg_agent.storage.models import ChatSettings
 from tg_agent.storage.repositories import ChatSettingsRepo
+from tg_agent.userbot.channel_config import ChannelConfig
 
 logger = get_logger(__name__)
 
@@ -47,6 +48,7 @@ class ChannelHandler:
         self.llm_client = llm_client
         self._contacted_path = Path("data/contacted.json")
         self._contacted: set[str] = self._load_contacted()
+        self._post_times: dict[int, list[datetime]] = {}  # channel_id -> [timestamps]
 
     def _load_contacted(self) -> set[str]:
         try:
@@ -57,12 +59,52 @@ class ChannelHandler:
     def _save_contacted(self) -> None:
         self._contacted_path.write_text(json.dumps(sorted(self._contacted)))
 
+    def _check_rate_limit(self, channel_id: int, max_per_hour: int) -> bool:
+        """Check if channel is within rate limit. Returns True if OK to process."""
+        now = datetime.utcnow()
+        hour_ago = now - timedelta(hours=1)
+
+        if channel_id not in self._post_times:
+            self._post_times[channel_id] = []
+
+        # Clean old entries
+        self._post_times[channel_id] = [
+            t for t in self._post_times[channel_id] if t > hour_ago
+        ]
+
+        # Check limit
+        if len(self._post_times[channel_id]) >= max_per_hour:
+            return False
+
+        # Record this post
+        self._post_times[channel_id].append(now)
+        return True
+
     def register_handlers(self) -> None:
-        channel_ids = self.settings.monitored_channel_ids
-        if not channel_ids:
-            logger.info("No monitored channels configured")
+        # Load channels from database
+        with self.db.get_sync_session() as session:
+            from tg_agent.storage.repositories import MonitoredChannelRepo
+            repo = MonitoredChannelRepo(session)
+            db_channels = repo.get_all()
+        
+        if not db_channels:
+            logger.info("No monitored channels configured in database")
             return
 
+        # Convert to ChannelConfig objects
+        channel_configs = []
+        for ch in db_channels:
+            cfg = ChannelConfig(
+                channel_id=ch.channel_id,
+                title=ch.channel_title or "",
+                enabled=ch.enabled,
+                auto_outreach=ch.auto_outreach,
+                keywords=ch.keywords.split(",") if ch.keywords else [],
+                max_posts_per_hour=ch.max_posts_per_hour,
+            )
+            channel_configs.append(cfg)
+        
+        channel_ids = [cfg.channel_id for cfg in channel_configs]
         self.client.add_event_handler(
             self._on_channel_post,
             events.NewMessage(chats=channel_ids),
@@ -74,8 +116,28 @@ class ChannelHandler:
         if not message.text:
             return
 
+        # Get channel config from database
+        with self.db.get_sync_session() as session:
+            from tg_agent.storage.repositories import MonitoredChannelRepo
+            repo = MonitoredChannelRepo(session)
+            channel_config = repo.get_by_id(event.chat_id)
+        
+        if not channel_config or not channel_config.enabled:
+            return
+
+        # Check rate limit
+        if not self._check_rate_limit(event.chat_id, channel_config.max_posts_per_hour):
+            logger.info(f"Rate limit exceeded for channel {event.chat_id}, skipping")
+            return
+
+        # Check keywords filter
+        keywords = channel_config.keywords.split(",") if channel_config.keywords else []
+        if keywords and not any(kw.lower() in message.text.lower() for kw in keywords):
+            logger.debug(f"Message does not match keywords for channel {event.chat_id}")
+            return
+
         chat = await event.get_chat()
-        channel_title = getattr(chat, "title", f"Channel {event.chat_id}")
+        channel_title = channel_config.channel_title or getattr(chat, "title", f"Channel {event.chat_id}")
 
         # Forward to owner
         text = (
@@ -92,8 +154,8 @@ class ChannelHandler:
         )
         logger.info(f"Forwarded channel post from {event.chat_id} ({channel_title})")
 
-        # Auto-outreach if LLM is available
-        if self.llm_client:
+        # Auto-outreach if configured and LLM is available
+        if channel_config.auto_outreach and self.llm_client:
             await self._try_outreach(message.text)
 
     async def _try_outreach(self, post_text: str) -> None:
