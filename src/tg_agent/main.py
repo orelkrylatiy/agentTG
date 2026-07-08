@@ -99,9 +99,6 @@ class Agent:
             control_bot=self.control_bot,
             llm_client=self.llm_client,
         )
-        catch_up_count = await incoming_handler.catch_up_missed_messages()
-        if catch_up_count:
-            logger.info(f"Startup catch-up processed {catch_up_count} dialog(s)")
 
         # Setup channel monitoring
         channel_handler = ChannelHandler(
@@ -120,6 +117,7 @@ class Agent:
             db=self.db,
             control_bot=self.control_bot,
             userbot_client=self.userbot.client,
+            incoming_handler=incoming_handler,
             channel_handler=channel_handler,
         )
 

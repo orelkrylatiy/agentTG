@@ -247,9 +247,12 @@ If all providers fail, the agent creates a draft with an error message for owner
 | `/untrust <chat>` | Remove trusted status |
 | `/send <chat> <msg>` | Send message (requires approval) |
 | `/recent` | Show recent agent actions |
+| `/catchup` | Manually process messages missed while agent was offline |
 | `/style` | Show prompt configuration |
 | `/help` | Show help message |
-| `/scan_channel [N]` | Scan last N posts from monitored channels (default: 10) |
+| `/scan_channel [N]` | Scan last N posts from monitored channels stored in SQLite (default: 10) |
+
+`/catchup` is the manual replacement for the old startup replay flow. It only runs when you invoke it from the control bot.
 
 ## Channel Monitoring
 
@@ -257,7 +260,13 @@ The agent can monitor Telegram channels for new posts, extract contact informati
 
 ### Configuration
 
-Add channels to `.env`:
+Channels are stored in SQLite and managed by the control bot commands:
+
+- `/add_channel` to add a channel
+- `/remove_channel` to remove a channel
+- `/channels` to inspect the current DB-backed list
+
+`MONITORED_CHANNELS` is kept as a legacy bootstrap format for first-run migration and for the standalone `outreach.py` script:
 
 ```bash
 MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach,-1001234567890:Design:outreach:figma,ui"
@@ -271,6 +280,8 @@ MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach,-1001234567890:Design:outrea
 | `Title` | ❌ | Human-readable name for logging |
 | `outreach` | ❌ | Enable automatic DM to contacts |
 | `keywords` | ❌ | Filter posts by keywords (comma-separated) |
+
+If you edit the bot-managed list through `/add_channel`, the database becomes the source of truth for `/channels` and `/scan_channel`.
 
 ### Examples
 

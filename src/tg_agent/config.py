@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     max_reply_chars: int = Field(default=800, alias="MAX_REPLY_CHARS")
 
     # Startup catch-up
-    startup_catchup_enabled: bool = Field(default=True, alias="STARTUP_CATCHUP_ENABLED")
+    startup_catchup_enabled: bool = Field(default=False, alias="STARTUP_CATCHUP_ENABLED")
     startup_catchup_dialog_limit: int = Field(default=50, alias="STARTUP_CATCHUP_DIALOG_LIMIT")
     startup_catchup_messages_per_chat: int = Field(
         default=20, alias="STARTUP_CATCHUP_MESSAGES_PER_CHAT"

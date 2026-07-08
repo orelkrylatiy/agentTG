@@ -358,13 +358,14 @@ class IncomingMessageHandler:
 
             logger.info(f"Auto-reply sent to chat {chat_id}")
 
-    async def catch_up_missed_messages(self) -> int:
+    async def catch_up_missed_messages(self, force: bool = False) -> int:
         """Process the latest missed relevant message per recent dialog."""
-        if not self.settings.startup_catchup_enabled:
-            logger.info("Startup catch-up disabled")
+        if not force and not self.settings.startup_catchup_enabled:
+            logger.info("Catch-up disabled")
             return 0
 
-        logger.info("Starting startup catch-up sync...")
+        mode = "manual" if force else "startup"
+        logger.info(f"Starting {mode} catch-up sync...")
         processed = 0
         dialogs = await self.client.get_dialogs(
             limit=self.settings.startup_catchup_dialog_limit
@@ -379,7 +380,7 @@ class IncomingMessageHandler:
                     f"Failed to catch up dialog {getattr(dialog, 'id', None)}: {e}"
                 )
 
-        logger.info(f"Startup catch-up finished: processed {processed} dialog(s)")
+        logger.info(f"{mode.title()} catch-up finished: processed {processed} dialog(s)")
         return processed
 
     async def _catch_up_dialog(self, dialog) -> bool:

@@ -1,5 +1,7 @@
 """Command handlers for control bot."""
 
+from typing import Any
+
 from aiogram import F, Dispatcher, Router, types
 from aiogram.filters import Command, CommandObject, CommandStart
 from telethon import TelegramClient
@@ -30,6 +32,7 @@ def setup_control_handlers(
     db: Database,
     control_bot: ControlBot,
     userbot_client: TelegramClient | None = None,
+    incoming_handler: Any | None = None,
     channel_handler=None,
 ) -> None:
     """
@@ -134,7 +137,19 @@ def setup_control_handlers(
         message: types.Message,
         command: CommandObject | None = None,
     ) -> None:
-        await cmd_scan_channel(message, settings, control_bot, userbot_client, _command_args(command), channel_handler)
+        await cmd_scan_channel(
+            message,
+            settings,
+            db,
+            control_bot,
+            userbot_client,
+            _command_args(command),
+            channel_handler,
+        )
+
+    @router.message(Command("catchup"))
+    async def catchup_handler(message: types.Message) -> None:
+        await cmd_catchup(message, incoming_handler)
 
     dp.include_router(router)
 
@@ -455,30 +470,54 @@ async def cmd_persona(message: types.Message, settings: Settings, args: str) -> 
 async def cmd_scan_channel(
     message: types.Message,
     settings: Settings,
+    db: Database,
     control_bot: ControlBot,
     client: TelegramClient | None,
     args: str,
     channel_handler=None,
 ) -> None:
-    """Handle /scan_channel [limit] — fetch recent posts and run outreach."""
+    """Handle /scan_channel [limit] [ON|OFF] — fetch recent posts and optionally run outreach."""
     if not client:
         await message.answer("❌ Userbot client not available.")
         return
 
-    channel_ids = settings.monitored_channel_ids
+    with db.get_sync_session() as session:
+        repo = MonitoredChannelRepo(session)
+        channel_ids = [channel.channel_id for channel in repo.get_all()]
+
     if not channel_ids:
-        await message.answer("❌ No channels configured in MONITORED_CHANNELS.")
+        # Legacy fallback for installs that still keep channels only in MONITORED_CHANNELS.
+        channel_ids = settings.monitored_channel_ids
+
+    if not channel_ids:
+        await message.answer("❌ No monitored channels configured.")
         return
 
-    try:
-        limit = max(1, min(int(args), 50)) if args.isdigit() else 10
-    except Exception:
-        limit = 10
+    # Parse arguments: [limit] [ON|OFF]
+    parts = args.strip().split()
+    limit = 10
+    outreach_mode = None  # None = use channel config, True = force ON, False = force OFF
 
-    do_outreach = channel_handler is not None and channel_handler.llm_client is not None
+    for part in parts:
+        if part.isdigit():
+            limit = max(1, min(int(part), 50))
+        elif part.upper() == "ON":
+            outreach_mode = True
+        elif part.upper() == "OFF":
+            outreach_mode = False
+
+    # Determine if outreach should be performed
+    base_outreach_available = channel_handler is not None and channel_handler.llm_client is not None
+    if outreach_mode is None:
+        # Use channel config settings
+        do_outreach = base_outreach_available
+    else:
+        # Explicit ON/OFF override
+        do_outreach = base_outreach_available and outreach_mode
+
     await message.answer(
         f"🔍 Сканирую {len(channel_ids)} канал(ов), последние {limit} постов"
-        + (" + запущу аутрич по новым контактам" if do_outreach else "") + "..."
+        + (" + запущу аутрич по новым контактам" if do_outreach else " (без аутрича)") + "..."
     )
 
     total = 0
@@ -519,30 +558,157 @@ async def cmd_scan_channel(
     await message.answer(summary)
 
 
+async def cmd_catchup(message: types.Message, incoming_handler: Any | None) -> None:
+    """Handle /catchup — manually process missed messages."""
+    if incoming_handler is None:
+        await message.answer("❌ Incoming handler unavailable.")
+        return
+
+    await message.answer("🔄 Запускаю ручной catch-up пропущенных сообщений...")
+    processed = await incoming_handler.catch_up_missed_messages(force=True)
+    if processed:
+        await message.answer(f"✅ Catch-up завершён. Обработано чатов: {processed}.")
+    else:
+        await message.answer("✅ Catch-up завершён. Новых пропущенных сообщений не найдено.")
+
+
 async def cmd_help(message: types.Message) -> None:
-    """Handle /help command."""
+    """Handle /help command — detailed API reference."""
     text = (
-        "🤖 <b>Available Commands:</b>\n\n"
-        "📊 <b>Status:</b>\n"
-        "  /status - Show agent status\n"
-        "  /pause - Pause agent\n"
-        "  /resume - Resume agent\n\n"
-        "💬 <b>Chats:</b>\n"
-        "  /chats - List configured chats\n"
-        "  /mode &lt;chat&gt; &lt;mode&gt; - Set chat mode (OFF/WATCH/DRAFT/AUTO)\n"
-        "  /trust &lt;chat&gt; - Mark chat as trusted\n"
-        "  /untrust &lt;chat&gt; - Remove trusted status\n\n"
-        "✏️ <b>Actions:</b>\n"
-        "  /send &lt;chat&gt; &lt;msg&gt; - Send message (requires approval)\n"
-        "  /recent - Show recent actions\n\n"
-        "📢 <b>Каналы:</b>\n"
-        "  /channels - Список отслеживаемых каналов\n"
-        "  /add_channel &lt;link|username&gt; [outreach] - Добавить канал\n"
-        "  /remove_channel &lt;channel_id&gt; - Удалить канал\n"
-        "  /scan_channel [N] - Последние N постов из каналов (по умолч. 10)\n\n"
-        "⚙️ <b>Settings:</b>\n"
-        "  /style - Show prompt configuration\n"
-        "  /help - This help message"
+        "🤖 <b>Telegram AI Userbot Agent — Command Reference</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📊 <b>УПРАВЛЕНИЕ АГЕНТОМ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/start</b>\n"
+        "  Запуск бота. Показывает приветственное сообщение.\n\n"
+        "<b>/status</b>\n"
+        "  Показать полное состояние агента:\n"
+        "  • Включён/выключен агент\n"
+        "  • Режим по умолчанию\n"
+        "  • Количество чатов по режимам (OFF/WATCH/DRAFT/AUTO)\n"
+        "  • Ожидающие действия (drafts на аппрув)\n"
+        "  • Провайдер LLM\n"
+        "  • Последняя активность и последний ответ агента\n\n"
+        "<b>/pause</b>\n"
+        "  ⏸️ Приостановить агента. Новые сообщения не обрабатываются.\n"
+        "  Агент сохраняет настройки, но игнорирует входящие.\n\n"
+        "<b>/resume</b>\n"
+        "  ▶️ Возобновить работу агента после паузы.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💬 <b>УПРАВЛЕНИЕ ЧАТАМИ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/chats</b>\n"
+        "  Список всех настроенных чатов (до 20):\n"
+        "  • Название или ID\n"
+        "  • Режим (OFF/WATCH/DRAFT/AUTO)\n"
+        "  • Статус доверия (🔒trusted / 🔓untrusted)\n\n"
+        "<b>/mode &lt;chat_id&gt; &lt;MODE&gt;</b>\n"
+        "  Установить режим для чата.\n"
+        "  Режимы:\n"
+        "  • OFF — игнорировать чат\n"
+        "  • WATCH — только уведомления, без ответов\n"
+        "  • DRAFT — генерировать ответ на аппрув\n"
+        "  • AUTO — автоответ (только для trusted)\n"
+        "  Примеры:\n"
+        "    /mode 123456789 DRAFT\n"
+        "    /mode Ivan AUTO\n\n"
+        "<b>/trust &lt;chat_id&gt;</b>\n"
+        "  Пометить чат как доверенный.\n"
+        "  Только trusted чаты могут получать AUTO-ответы.\n"
+        "  Пример: /trust 123456789\n\n"
+        "<b>/untrust &lt;chat_id&gt;</b>\n"
+        "  Убрать статус доверенного чата.\n"
+        "  Пример: /untrust 123456789\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "✏️ <b>ОТПРАВКА СООБЩЕНИЙ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/send &lt;chat_id&gt; &lt;текст&gt;</b>\n"
+        "  Отправить сообщение вручную через HITL-аппрув.\n"
+        "  Бот пришлёт черновик с кнопками [Approve]/[Reject].\n"
+        "  Пример:\n"
+        "    /send 123456789 Привет, готов обсудить вакансию\n\n"
+        "<b>/recent</b>\n"
+        "  Последние 10 действий агента:\n"
+        "  • ID действия\n"
+        "  • Тип (reply/send_message)\n"
+        "  • Статус (pending/approved/rejected/executed/expired)\n"
+        "  • Chat ID\n\n"
+        "<b>/catchup</b>\n"
+        "  Ручная обработка пропущенных сообщений.\n"
+        "  Сканирует последние диалоги и обрабатывает новые\n"
+        "  сообщения, которые пришли пока агент был офлайн.\n"
+        "  Идеально после рестарта или долгого простоя.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📢 <b>КАНАЛЫ (МОНИТОРИНГ ВАКАНСИЙ)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/channels</b>\n"
+        "  Список всех отслеживаемых каналов:\n"
+        "  • ID канала\n"
+        "  • Название\n"
+        "  • Outreach (вкл/выкл)\n"
+        "  • Keywords (фильтр по ключевым словам)\n\n"
+        "<b>/add_channel &lt;ссылка|username&gt; [outreach]</b>\n"
+        "  Добавить канал для мониторинга.\n"
+        "  outreach — опционально, включает авто-рассылку контактов.\n"
+        "  Примеры:\n"
+        "    /add_channel @it_jobs\n"
+        "    /add_channel @it_jobs outreach\n"
+        "    /add_channel https://t.me/+ucoAOCsXCwk3ZmFi\n\n"
+        "<b>/remove_channel &lt;channel_id&gt;</b>\n"
+        "  Удалить канал из мониторинга.\n"
+        "  ID можно узнать через /channels.\n"
+        "  Пример: /remove_channel -1001782596777\n\n"
+        "<b>/scan_channel [N] [ON|OFF]</b>\n"
+        "  Сканировать последние N постов из всех каналов.\n"
+        "  Параметры:\n"
+        "  • N — количество постов (1-50, по умолч. 10)\n"
+        "  • ON — запустить аутрич по контактам\n"
+        "  • OFF — только переслать посты, без аутрича\n"
+        "  Примеры:\n"
+        "    /scan_channel         # 10 постов, режим каналов\n"
+        "    /scan_channel 20      # 20 постов, режим каналов\n"
+        "    /scan_channel ON      # 10 постов + аутрич\n"
+        "    /scan_channel OFF     # 10 постов, без аутрича\n"
+        "    /scan_channel 30 ON   # 30 постов + аутрич\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚙️ <b>НАСТРОЙКИ И ПЕРСОНА</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/style</b>\n"
+        "  Показать путь к файлам системных промптов:\n"
+        "  • system.ru.txt — основной промпт\n"
+        "  • safety.ru.txt — правила безопасности\n\n"
+        "<b>/persona [текст]</b>\n"
+        "  Просмотр или установка персоны агента.\n"
+        "  Без аргумента — показывает текущую персону.\n"
+        "  С текстом — обновляет и применяет сразу.\n"
+        "  Пример:\n"
+        "    /persona Ты — frontend-разработчик с 5 годами опыта\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "ℹ️ <b>ПРИМЕРЫ ИСПОЛЬЗОВАНИЯ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "1️⃣ <b>Безопасный старт:</b>\n"
+        "   /status → убедиться AGENT_GLOBAL_ENABLED=false\n"
+        "   /mode 123456789 DRAFT → первый чат в режиме черновиков\n"
+        "   /trust 123456789 → если чат доверенный\n\n"
+        "2️⃣ <b>Мониторинг вакансий:</b>\n"
+        "   /add_channel @it_jobs outreach\n"
+        "   /scan_channel 20 ON → сканировать и писать контактам\n\n"
+        "3️⃣ <b>Ручная отправка:</b>\n"
+        "   /send 123456789 Готов обсудить детали → аппрув в боте\n\n"
+        "4️⃣ <b>После рестарта:</b>\n"
+        "   /catchup → обработать пропущенные сообщения\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📚 <b>РЕЖИМЫ ЧАТОВ (подробно)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>OFF</b> — Агент полностью игнорирует чат.\n"
+        "<b>WATCH</b> — Агент уведомляет владельца о сообщениях, но не отвечает.\n"
+        "<b>DRAFT</b> — Агент генерирует ответ и ждёт аппрува.\n"
+        "<b>AUTO</b> — Агент отвечает автоматически (только trusted чаты).\n\n"
+        "⚠️ <b>Безопасность:</b>\n"
+        "• Агент стартует выключенным (AGENT_GLOBAL_ENABLED=false)\n"
+        "• Режим по умолчанию — DRAFT (требуется аппрув)\n"
+        "• AUTO работает только для trusted чатов\n"
+        "• Деньги/встречи/обязательства всегда требуют аппрува\n"
     )
     await message.answer(text, parse_mode="HTML")
 

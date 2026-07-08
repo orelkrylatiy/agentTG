@@ -5,6 +5,12 @@ _GREETING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Also match greetings anywhere in text (for aggressive stripping)
+_GREETING_ANYWHERE_RE = re.compile(
+    r'\b(привет|здарова|хай|hi|hello)\b[!?,.\s]*',
+    re.IGNORECASE,
+)
+
 _USER_ASKS_ABOUT_ME = (
     'а у тебя', 'ты как', 'как сам', 'а ты как',
     'сам как', 'как ты', 'а ты?',
@@ -48,9 +54,13 @@ def clean_reply(
 ) -> str:
     text = text.strip()
 
-    if dialog_started:
-        text = _GREETING_RE.sub('', text).strip()
-        text = re.sub(r'^[!,.\s]+', '', text).strip()
+    # Always strip greetings from start — LLM tends to add them even with system prompt
+    text = _GREETING_RE.sub('', text).strip()
+    text = re.sub(r'^[!,.\s]+', '', text).strip()
+
+    # Also strip greetings from anywhere in text (prevents "Как дела? Привет!" pattern)
+    text = _GREETING_ANYWHERE_RE.sub('', text).strip()
+    text = re.sub(r'\s+', ' ', text).strip()
 
     # Strip follow-up if: user asked about agent, OR agent already asked in previous turn
     user_asked = any(p in last_user_text.lower() for p in _USER_ASKS_ABOUT_ME)
