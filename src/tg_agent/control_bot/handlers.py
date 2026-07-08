@@ -126,7 +126,7 @@ def setup_control_handlers(
         message: types.Message,
         command: CommandObject | None = None,
     ) -> None:
-        await cmd_remove_channel(message, settings, db, _command_args(command))
+        await cmd_remove_channel(message, settings, db, _command_args(command), userbot_client)
 
     @router.message(Command("help"))
     async def help_handler(message: types.Message) -> None:
@@ -531,12 +531,25 @@ async def cmd_scan_channel(
             for msg in reversed(msgs):
                 if not msg.text:
                     continue
+
+                # Truncate to 400 chars for cleaner view
+                preview_len = 400
+                text_preview = msg.text[:preview_len]
+                truncated = len(msg.text) > preview_len
+
+                # Build channel link (t.me/c/channel_id for private channels)
+                link_id = str(channel_id)
+                if link_id.startswith("-100"):
+                    link_id = link_id[4:]  # Remove -100 prefix
+                channel_link = f"https://t.me/c/{link_id}/{msg.id}"
+
                 text = (
-                    f"📢 <b>{title}</b> (история)\n\n"
-                    f"{msg.text[:1000]}"
+                    f"{text_preview}"
+                    f"{'... (обрезано)' if truncated else ''}"
+                    f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📢 <b>{title}</b> | <a href='{channel_link}'>оригинал</a>"
                 )
-                if len(msg.text) > 1000:
-                    text += "\n\n<i>... (обрезано)</i>"
+
                 await control_bot.send_message(
                     chat_id=settings.owner_telegram_id,
                     text=text,
@@ -654,10 +667,13 @@ async def cmd_help(message: types.Message) -> None:
         "    /add_channel @it_jobs\n"
         "    /add_channel @it_jobs outreach\n"
         "    /add_channel https://t.me/+ucoAOCsXCwk3ZmFi\n\n"
-        "<b>/remove_channel &lt;channel_id&gt;</b>\n"
+        "<b>/remove_channel &lt;ссылка|username|ID&gt;</b>\n"
         "  Удалить канал из мониторинга.\n"
-        "  ID можно узнать через /channels.\n"
-        "  Пример: /remove_channel -1001782596777\n\n"
+        "  Можно указать ссылку, username или числовой ID.\n"
+        "  Примеры:\n"
+        "    /remove_channel @it_jobs\n"
+        "    /remove_channel https://t.me/+ucoAOCsXCwk3ZmFi\n"
+        "    /remove_channel -1001782596777\n\n"
         "<b>/scan_channel [N] [ON|OFF]</b>\n"
         "  Сканировать последние N постов из всех каналов.\n"
         "  Параметры:\n"
@@ -822,33 +838,60 @@ async def cmd_remove_channel(
     message: types.Message,
     settings: Settings,
     db: Database,
-    args: str
+    args: str,
+    userbot_client: TelegramClient | None = None,
 ) -> None:
-    """Handle /remove_channel command - remove channel by ID."""
+    """Handle /remove_channel command - remove channel by ID, link, or username."""
     if not args:
         await message.answer(
-            "❌ <b>Укажите ID канала</b>\n\n"
-            "Пример:\n"
+            "❌ <b>Укажите ссылку, username или ID канала</b>\n\n"
+            "Примеры:\n"
+            "  /remove_channel @it_jobs\n"
+            "  /remove_channel https://t.me/+ucoAOCsXCwk3ZmFi\n"
             "  /remove_channel -1001782596777\n\n"
             "Используйте /channels чтобы увидеть список.",
             parse_mode="HTML"
         )
         return
-    
-    try:
+
+    # Try to parse as integer ID first
+    channel_id = None
+    if args.lstrip("-").isdigit():
         channel_id = int(args)
-    except ValueError:
-        await message.answer(
-            "❌ Неверный формат ID. Должно быть число (например, -1001782596777)",
-            parse_mode="HTML"
-        )
-        return
-    
+    else:
+        # Resolve via Telethon (link or username)
+        if userbot_client is None:
+            await message.answer(
+                "❌ Userbot клиент недоступен. Укажите числовой ID канала.",
+                parse_mode="HTML"
+            )
+            return
+
+        status_msg = await message.answer("⏳ Ищу канал...", parse_mode="HTML")
+        try:
+            entity = await userbot_client.get_entity(args)
+            channel_id = entity.id
+            if hasattr(channel_id, 'channel_id'):
+                channel_id = channel_id.channel_id
+            # Convert to superchannel format if needed
+            if isinstance(channel_id, int) and channel_id > 0:
+                channel_id = int(f"-100{channel_id}")
+            await status_msg.edit_text(
+                f"✅ Найдено: <code>{channel_id}</code>\nУдаляю...",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await status_msg.edit_text(
+                f"❌ Канал не найден: {e}",
+                parse_mode="HTML"
+            )
+            return
+
     # Remove from database
     with db.get_sync_session() as session:
         repo = MonitoredChannelRepo(session)
         removed = repo.remove(channel_id)
-    
+
     if removed:
         await message.answer(
             f"✅ <b>Канал удалён!</b>\n\n"
@@ -858,6 +901,6 @@ async def cmd_remove_channel(
         )
     else:
         await message.answer(
-            f"❌ Канал {channel_id} не найден в базе",
+            f"❌ Канал <code>{channel_id}</code> не найден в базе",
             parse_mode="HTML"
         )
