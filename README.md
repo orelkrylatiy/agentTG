@@ -250,7 +250,7 @@ If all providers fail, the agent creates a draft with an error message for owner
 | `/catchup` | Manually process messages missed while agent was offline |
 | `/style` | Show prompt configuration |
 | `/help` | Show help message |
-| `/scan_channel [N]` | Scan last N posts from monitored channels stored in SQLite (default: 10) |
+| `/scan_channel [N] [ON\|OFF]` | Scan last N posts from SQLite channels (default: 10); `ON` processes only channels explicitly configured for outreach |
 
 `/catchup` is the manual replacement for the old startup replay flow. It only runs when you invoke it from the control bot.
 
@@ -266,10 +266,10 @@ Channels are stored in SQLite and managed by the control bot commands:
 - `/remove_channel` to remove a channel
 - `/channels` to inspect the current DB-backed list
 
-`MONITORED_CHANNELS` is kept as a legacy bootstrap format for first-run migration and for the standalone `outreach.py` script:
+`MONITORED_CHANNELS` is kept as a legacy bootstrap format for first-run migration and for the standalone `outreach.py` script. SQLite is the runtime source of truth after the first startup migration; `/add_channel` and `/remove_channel` take effect immediately and survive restarts.
 
 ```bash
-MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach,-1001234567890:Design:outreach:figma,ui"
+MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach:python,frontend,-1001234567890:Design:outreach:figma,ui"
 ```
 
 **Format:** `channel_id[:Title][:outreach][:keyword1,keyword2]`
@@ -279,7 +279,7 @@ MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach,-1001234567890:Design:outrea
 | `channel_id` | ✅ | Telegram channel ID (e.g., `-1001782596777`) |
 | `Title` | ❌ | Human-readable name for logging |
 | `outreach` | ❌ | Enable automatic DM to contacts |
-| `keywords` | ❌ | Filter posts by keywords (comma-separated) |
+| `keywords` | ❌ | Filter posts by keywords (comma-separated). A later channel must start with its numeric ID. |
 
 If you edit the bot-managed list through `/add_channel`, the database becomes the source of truth for `/channels` and `/scan_channel`.
 
@@ -300,9 +300,9 @@ MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach"
 MONITORED_CHANNELS="-1001782596777:IT:outreach:python,frontend"
 ```
 
-**Multiple channels:**
+**Multiple channels with keyword filters:**
 ```bash
-MONITORED_CHANNELS="-1001782596777:IT:outreach:python,-1001234567890:Design:outreach:figma"
+MONITORED_CHANNELS="-1001782596777:IT:outreach:python,frontend,-1001234567890:Design:outreach:figma,ui"
 ```
 
 ### How It Works
@@ -312,6 +312,24 @@ MONITORED_CHANNELS="-1001782596777:IT:outreach:python,-1001234567890:Design:outr
 3. **Generate**: Creates personalized message using LLM
 4. **Send**: Sends DM via your userbot account
 5. **Track**: Saves contacted usernames to `data/contacted.json` (no duplicates)
+
+Channel posts are subscribed through one live Telethon handler and checked against SQLite on each event. This means channels added or removed through the control bot do not require a process restart. Manual scans apply each channel's enabled state, keyword filter, and `auto_outreach` flag. `ON` enables outreach for channels already configured with `auto_outreach`; it never enables outreach for monitor-only channels.
+
+### Custom Prompts
+
+Prompt files are optional and are resolved dynamically, so edits take effect without restarting the agent:
+
+```text
+prompts/system.ru.txt                 # global reply instructions
+prompts/persona.ru.txt                # optional persona layer
+prompts/safety.ru.txt                 # safety layer
+prompts/outreach/default.txt          # default outreach prompt
+prompts/outreach/<channel_id>.txt     # channel-specific outreach prompt
+prompts/reply/default.txt             # default incoming-reply prompt
+prompts/reply/<chat_id>.txt            # chat-specific incoming-reply prompt
+```
+
+Specific channel/chat files take precedence over their `default.txt` file. See [prompts/PROMPTS_SPEC.md](prompts/PROMPTS_SPEC.md) for examples and the exact fallback order.
 
 ### Manual Outreach
 

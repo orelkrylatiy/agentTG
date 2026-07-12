@@ -1,7 +1,12 @@
 """
 Prompt management - loading and formatting prompts.
+
+Supports custom prompts per channel (outreach) and per chat (reply) with fallback to defaults.
+See: prompts/PROMPTS_SPEC.md for full specification.
 """
 
+
+from pathlib import Path
 
 from tg_agent.config import Settings
 from tg_agent.logging import get_logger
@@ -12,6 +17,11 @@ logger = get_logger(__name__)
 class PromptManager:
     """
     Manages loading and formatting of prompts.
+
+    Supports:
+    - System prompts (legacy): system.ru.txt, safety.ru.txt
+    - Outreach prompts: prompts/outreach/{channel_id}.txt → default.txt
+    - Reply prompts: prompts/reply/{chat_id}.txt → default.txt
     """
 
     def __init__(self, settings: Settings):
@@ -25,6 +35,10 @@ class PromptManager:
         self.prompts_dir = settings.prompts_dir
         self._system_prompt: str | None = None
         self._safety_prompt: str | None = None
+
+        # Prompt directories for outreach and reply
+        self.outreach_prompts_dir = self.prompts_dir / "outreach"
+        self.reply_prompts_dir = self.prompts_dir / "reply"
 
     def _load_prompt_file(self, filename: str) -> str:
         """
@@ -86,6 +100,18 @@ class PromptManager:
             parts.append(persona)
         if safety := self.safety_prompt:
             parts.append(safety)
+        return "\n\n".join(parts)
+
+    def get_reply_system_prompt(self, chat_id: int) -> str:
+        """
+        Get reply system prompt with global policy layers preserved.
+
+        Chat-specific and default reply prompts customize behavior, but they do not
+        replace the invariant system/persona/safety instructions.
+        """
+        parts = [self.get_full_system_prompt()]
+        if reply_prompt := self.get_reply_prompt(chat_id):
+            parts.append(reply_prompt)
         return "\n\n".join(parts)
 
     def format_context_messages(
@@ -167,3 +193,81 @@ class PromptManager:
             })
 
         return messages
+
+    def get_outreach_prompt(self, channel_id: int) -> str:
+        """
+        Load outreach prompt for a specific channel.
+
+        Tries to load custom prompt for channel, falls back to default.
+
+        Args:
+            channel_id: Telegram channel ID (e.g., -1001782596777)
+
+        Returns:
+            Prompt text for outreach messages.
+        """
+        custom_path = self.outreach_prompts_dir / f"{channel_id}.txt"
+        default_path = self.outreach_prompts_dir / "default.txt"
+
+        if content := self._load_custom_prompt(
+            custom_path,
+            f"custom outreach prompt for channel {channel_id}",
+        ):
+            return content
+        if content := self._load_custom_prompt(default_path, "default outreach prompt"):
+            return content
+
+        # Last resort: hardcoded fallback
+        return """Ты — фронтенд-разработчик с 5 годами опыта, ищешь новую работу.
+Напиши короткое сообщение (2-3 предложения) рекрутеру.
+Упомяни деталь из вакансии, скажи что готов скинуть резюме, спроси актуальна ли позиция."""
+
+    def get_reply_prompt(self, chat_id: int) -> str:
+        """
+        Load reply prompt for a specific chat.
+
+        Tries to load custom prompt for chat, falls back to default.
+
+        Args:
+            chat_id: Telegram chat ID (e.g., 8465750445)
+
+        Returns:
+            Prompt text for reply generation.
+        """
+        custom_path = self.reply_prompts_dir / f"{chat_id}.txt"
+        default_path = self.reply_prompts_dir / "default.txt"
+
+        if content := self._load_custom_prompt(
+            custom_path,
+            f"custom reply prompt for chat {chat_id}",
+        ):
+            return content
+        if content := self._load_custom_prompt(default_path, "default reply prompt"):
+            return content
+
+        # Last resort: hardcoded fallback
+        return """Ты отвечаешь в Telegram от имени Максима — живого человека.
+Пиши кратко (1-2 фразы), по-русски, неформально.
+Без markdown, без приветствий если диалог уже идёт."""
+
+    def _load_custom_prompt(self, path: Path, label: str) -> str:
+        """
+        Load a custom/default prompt file.
+
+        Empty files are treated as missing so fallback resolution can continue.
+        """
+        if not path.exists():
+            return ""
+
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            logger.warning(f"Error reading {label} {path}: {e}")
+            return ""
+
+        if not content:
+            logger.warning(f"Ignoring empty {label}: {path}")
+            return ""
+
+        logger.info(f"Loaded {label}")
+        return content

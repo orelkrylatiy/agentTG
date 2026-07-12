@@ -50,6 +50,8 @@ class Agent:
         self.userbot = UserbotClient(settings)
         self.control_bot = ControlBot(settings)
         self.llm_client = LLMClient(settings)
+        from tg_agent.agent.prompts import PromptManager
+        self.prompt_manager = PromptManager(settings)
 
         # Shutdown flag
         self._shutdown = False
@@ -98,6 +100,7 @@ class Agent:
             client=self.userbot.client,
             control_bot=self.control_bot,
             llm_client=self.llm_client,
+            prompt_manager=self.prompt_manager,
         )
 
         # Setup channel monitoring
@@ -107,6 +110,7 @@ class Agent:
             control_bot=self.control_bot,
             db=self.db,
             llm_client=self.llm_client,
+            prompt_manager=self.prompt_manager,
         )
         channel_handler.register_handlers()
 

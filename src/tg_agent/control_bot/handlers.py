@@ -476,27 +476,26 @@ async def cmd_scan_channel(
     args: str,
     channel_handler=None,
 ) -> None:
-    """Handle /scan_channel [limit] [ON|OFF] — fetch recent posts and optionally run outreach."""
+    """Scan recent posts and optionally run configured per-channel outreach."""
     if not client:
         await message.answer("❌ Userbot client not available.")
         return
 
     with db.get_sync_session() as session:
-        repo = MonitoredChannelRepo(session)
-        channel_ids = [channel.channel_id for channel in repo.get_all()]
+        channels = MonitoredChannelRepo(session).get_all()
 
-    if not channel_ids:
+    if not channels:
         # Legacy fallback for installs that still keep channels only in MONITORED_CHANNELS.
-        channel_ids = settings.monitored_channel_ids
+        channels = settings.channel_configs
 
-    if not channel_ids:
+    if not channels:
         await message.answer("❌ No monitored channels configured.")
         return
 
     # Parse arguments: [limit] [ON|OFF]
     parts = args.strip().split()
     limit = 10
-    outreach_mode = None  # None = use channel config, True = force ON, False = force OFF
+    outreach_mode = None  # None/ON = use channel config, OFF = disable outreach
 
     for part in parts:
         if part.isdigit():
@@ -506,23 +505,23 @@ async def cmd_scan_channel(
         elif part.upper() == "OFF":
             outreach_mode = False
 
-    # Determine if outreach should be performed
+    # Outreach is always constrained by the channel's persisted auto_outreach flag.
+    # ON enables configured outreach; it must not turn monitor-only channels into DM sources.
     base_outreach_available = channel_handler is not None and channel_handler.llm_client is not None
-    if outreach_mode is None:
-        # Use channel config settings
-        do_outreach = base_outreach_available
-    else:
-        # Explicit ON/OFF override
-        do_outreach = base_outreach_available and outreach_mode
 
     await message.answer(
-        f"🔍 Сканирую {len(channel_ids)} канал(ов), последние {limit} постов"
-        + (" + запущу аутрич по новым контактам" if do_outreach else " (без аутрича)") + "..."
+        f"🔍 Сканирую {len(channels)} канал(ов), последние {limit} постов"
+        + (" + обработаю настроенный аутрич" if base_outreach_available and outreach_mode is not False else " (без аутрича)") + "..."
     )
 
     total = 0
     outreach_count = 0
-    for channel_id in channel_ids:
+    for channel in channels:
+        channel_id = channel.channel_id
+        channel_keywords = [keyword.strip().lower() for keyword in (channel.keywords or [])]
+        if isinstance(channel.keywords, str):
+            channel_keywords = [keyword.strip().lower() for keyword in channel.keywords.split(",")]
+        channel_auto_outreach = bool(channel.auto_outreach)
         try:
             msgs = await client.get_messages(channel_id, limit=limit)
             chat = await client.get_entity(channel_id)
@@ -530,6 +529,9 @@ async def cmd_scan_channel(
 
             for msg in reversed(msgs):
                 if not msg.text:
+                    continue
+
+                if channel_keywords and not any(keyword in msg.text.lower() for keyword in channel_keywords):
                     continue
 
                 # Truncate to 400 chars for cleaner view
@@ -557,16 +559,21 @@ async def cmd_scan_channel(
                 )
                 total += 1
 
+                do_outreach = (
+                    base_outreach_available
+                    and channel_auto_outreach
+                    and outreach_mode is not False
+                )
                 if do_outreach:
                     before = len(channel_handler._contacted)
-                    await channel_handler._try_outreach(msg.text)
+                    await channel_handler._try_outreach(msg.text, channel_id)
                     outreach_count += len(channel_handler._contacted) - before
 
         except Exception as e:
             await message.answer(f"❌ Ошибка при сканировании {channel_id}: {e}")
 
     summary = f"✅ Переслано {total} постов."
-    if do_outreach:
+    if base_outreach_available and outreach_mode is not False:
         summary += f" Написал {outreach_count} новым контактам."
     await message.answer(summary)
 
@@ -678,7 +685,7 @@ async def cmd_help(message: types.Message) -> None:
         "  Сканировать последние N постов из всех каналов.\n"
         "  Параметры:\n"
         "  • N — количество постов (1-50, по умолч. 10)\n"
-        "  • ON — запустить аутрич по контактам\n"
+        "  • ON — обработать аутрич только для каналов, где он включён\n"
         "  • OFF — только переслать посты, без аутрича\n"
         "  Примеры:\n"
         "    /scan_channel         # 10 постов, режим каналов\n"

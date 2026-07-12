@@ -11,6 +11,7 @@ from telethon.tl.types import Channel, Chat
 from telethon.tl.types import Message
 
 from tg_agent.agent.llm import LLMClient
+from tg_agent.agent.prompts import PromptManager
 from tg_agent.agent.reply import ReplyGenerator
 from tg_agent.config import Settings
 from tg_agent.control_bot import ControlBot
@@ -32,7 +33,7 @@ logger = get_logger(__name__)
 
 class IncomingMessageHandler:
     """
-    Handles incoming messages for the userbot.
+    Handles incoming messages in chats where the userbot is present.
     """
 
     def __init__(
@@ -42,9 +43,10 @@ class IncomingMessageHandler:
         client: TelegramClient,
         control_bot: ControlBot,
         llm_client: LLMClient,
+        prompt_manager: PromptManager | None = None,
     ):
         """
-        Initialize message handler.
+        Initialize incoming message handler.
 
         Args:
             settings: Application settings.
@@ -52,16 +54,18 @@ class IncomingMessageHandler:
             client: Telethon client.
             control_bot: Control bot for notifications.
             llm_client: LLM client for reply generation.
+            prompt_manager: Prompt manager for custom prompts.
         """
         self.settings = settings
         self.db = db
         self.client = client
         self.control_bot = control_bot
         self.llm_client = llm_client
+        self.prompt_manager = prompt_manager
 
         # Initialize components
         self.sender = MessageSender(client)
-        self.reply_generator = ReplyGenerator(settings, llm_client)
+        self.reply_generator = ReplyGenerator(settings, llm_client, prompt_manager)
         self.cooldown_manager = CooldownManager(settings.cooldown_seconds)
         self.message_filter = MessageFilter()
         self.policy_gate = PolicyGate(
@@ -565,6 +569,7 @@ def setup_incoming_handlers(
     client: TelegramClient,
     control_bot: ControlBot,
     llm_client: LLMClient,
+    prompt_manager: PromptManager | None = None,
 ) -> IncomingMessageHandler:
     """
     Set up incoming message handlers.
@@ -575,6 +580,7 @@ def setup_incoming_handlers(
         client: Telethon client.
         control_bot: Control bot instance.
         llm_client: LLM client instance.
+        prompt_manager: Optional prompt manager for custom prompts.
 
     Returns:
         Configured IncomingMessageHandler.
@@ -585,6 +591,7 @@ def setup_incoming_handlers(
         client=client,
         control_bot=control_bot,
         llm_client=llm_client,
+        prompt_manager=prompt_manager,
     )
     handler.register_handlers()
     return handler

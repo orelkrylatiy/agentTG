@@ -31,17 +31,23 @@ class ReplyGenerator:
     Generates replies using LLM with context management.
     """
 
-    def __init__(self, settings: Settings, llm_client: LLMClient):
+    def __init__(
+        self,
+        settings: Settings,
+        llm_client: LLMClient,
+        prompt_manager: PromptManager | None = None,
+    ):
         """
         Initialize reply generator.
 
         Args:
             settings: Application settings.
             llm_client: LLM client instance.
+            prompt_manager: Optional prompt manager for custom prompts.
         """
         self.settings = settings
         self.llm_client = llm_client
-        self.prompt_manager = PromptManager(settings)
+        self.prompt_manager = prompt_manager or PromptManager(settings)
         self.max_context_messages = settings.max_context_messages
 
     async def generate(
@@ -88,8 +94,9 @@ class ReplyGenerator:
 
         messages = context_turns + [current]
 
-        # Get system prompt
-        system_prompt = self.prompt_manager.get_full_system_prompt()
+        # Compose chat-specific reply instructions with global persona/safety layers.
+        chat_id = incoming_message.chat_id
+        system_prompt = self.prompt_manager.get_reply_system_prompt(chat_id)
 
         # Log context for debugging
         logger.info(

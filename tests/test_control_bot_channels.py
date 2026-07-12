@@ -68,3 +68,39 @@ async def test_scan_channel_uses_database_channels(tmp_path, monkeypatch):
     assert "Сканирую 4 канал(ов)" in first_message
     assert client.get_messages.await_count == 4
     assert control_bot.send_message.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_scan_channel_respects_channel_policy(tmp_path):
+    db = Database(database_url=f"sqlite:///{tmp_path / 'agent.db'}")
+    await db.init_db()
+
+    with db.get_sync_session() as session:
+        repo = MonitoredChannelRepo(session)
+        repo.add(channel_id=-1001, channel_title="Monitor", auto_outreach=False, keywords=["python"])
+        repo.add(channel_id=-1002, channel_title="Outreach", auto_outreach=True, keywords=["python"])
+
+    message = MagicMock()
+    message.answer = AsyncMock()
+    control_bot = MagicMock()
+    control_bot.send_message = AsyncMock(return_value=True)
+    client = MagicMock()
+    client.get_messages = AsyncMock(
+        side_effect=lambda channel_id, limit: [
+            SimpleNamespace(text="unrelated post"),
+            SimpleNamespace(text="python post"),
+        ]
+    )
+    client.get_entity = AsyncMock(side_effect=lambda channel_id: SimpleNamespace(title=str(channel_id)))
+
+    channel_handler = MagicMock()
+    channel_handler.llm_client = object()
+    channel_handler._contacted = set()
+    channel_handler._try_outreach = AsyncMock()
+
+    settings = SimpleNamespace(owner_telegram_id=123456)
+    await cmd_scan_channel(message, settings, db, control_bot, client, "ON", channel_handler)
+
+    assert control_bot.send_message.await_count == 2
+    channel_handler._try_outreach.assert_awaited_once()
+    assert channel_handler._try_outreach.await_args.args[1] == -1002

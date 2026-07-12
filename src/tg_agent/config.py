@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import os
+import re
 from pathlib import Path
 from typing import ClassVar, Literal
 from urllib.parse import urlparse
@@ -121,7 +122,7 @@ class Settings(BaseSettings):
         if not self.monitored_channels:
             return []
         result = []
-        for part in self.monitored_channels.split(","):
+        for part in self._channel_specs():
             part = part.strip()
             if part:
                 try:
@@ -140,7 +141,7 @@ class Settings(BaseSettings):
         if not self.monitored_channels:
             return []
         result = []
-        for part in self.monitored_channels.split(","):
+        for part in self._channel_specs():
             part = part.strip()
             if part:
                 try:
@@ -151,6 +152,14 @@ class Settings(BaseSettings):
                     logger = get_logger(__name__)
                     logger.warning(f"Skipping invalid channel config '{part}': {e}")
         return result
+
+    def _channel_specs(self) -> list[str]:
+        """Split channel specs without treating keyword commas as separators."""
+        return [
+            part.strip()
+            for part in re.split(r"[;]|,\s*(?=-?\d+(?::|$))", self.monitored_channels)
+            if part.strip()
+        ]
 
     def get_channel_config(self, channel_id: int) -> ChannelConfig | None:
         """Get configuration for a specific channel by ID."""

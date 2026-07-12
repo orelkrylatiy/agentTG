@@ -1,5 +1,41 @@
 """
 Channel configuration models and utilities.
+
+# TODO: Per-Channel Customization (Feature Request)
+#
+# Current limitation: All channels share the same outreach prompt and action type.
+#
+# Desired behavior:
+# ┌──────────────┬──────────────────────────┬──────────────┬─────────────┐
+# │ Channel      │ Custom Prompt            │ Action Type  │ Mode        │
+# ├──────────────┼──────────────────────────┼──────────────┼─────────────┤
+# │ Менторство   │ "Предлагай менторство"   │ comment      │ DRAFT       │
+# │ Вакансии (HR)│ "Отвечай HR кратко"      │ dm (outreach)│ AUTO        │
+# │ Новости      │ —                        │ forward_only │ WATCH       │
+# └──────────────┴──────────────────────────┴──────────────┴─────────────┘
+#
+# Required changes:
+# 1. Add fields to ChannelConfig:
+#    - action_type: Literal["comment", "dm", "forward_only"] = "dm"
+#    - custom_prompt: str | None = None  # Override default OUTREACH_SYSTEM prompt
+#    - auto_reply_mode: Literal["AUTO", "DRAFT", "WATCH"] = "DRAFT"
+#
+# 2. Update database schema (MonitoredChannel model):
+#    - Add: action_type, custom_prompt, auto_reply_mode columns
+#
+# 3. Update channel_handler.py:
+#    - If action_type == "comment": send reply to post (reply_to=msg.id)
+#    - If action_type == "dm": current outreach flow (send to @username)
+#    - If action_type == "forward_only": skip outreach, just forward
+#
+# 4. Update control bot commands:
+#    - /channel_prompt <chat_id> <prompt>  # Set custom prompt
+#    - /channel_action <chat_id> <action>  # Set action type
+#
+# Use cases:
+# - Channel 1 (менторство): Auto-comment under posts offering mentorship
+# - Channel 2 (HR vacancies): Auto-DM to recruiters with personalized reply
+# - Channel 3 (news): Forward only, no auto-actions
 """
 
 from dataclasses import dataclass, field

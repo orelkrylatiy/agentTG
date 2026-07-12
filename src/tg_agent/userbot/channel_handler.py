@@ -11,23 +11,15 @@ from pathlib import Path
 from telethon import TelegramClient, events
 
 from tg_agent.agent.llm import LLMClient
+from tg_agent.agent.prompts import PromptManager
 from tg_agent.config import Settings
 from tg_agent.control_bot import ControlBot
 from tg_agent.logging import get_logger
 from tg_agent.policy.modes import ChatMode
 from tg_agent.storage.models import ChatSettings
 from tg_agent.storage.repositories import ChatSettingsRepo
-from tg_agent.userbot.channel_config import ChannelConfig
 
 logger = get_logger(__name__)
-
-OUTREACH_SYSTEM = """Ты — фронтенд-разработчик с 5 годами опыта, ищешь новую работу.
-Пишешь первое сообщение рекрутеру или работодателю из канала вакансий.
-Напиши короткое живое сообщение (2-3 предложения) на русском:
-— упомяни конкретную деталь из вакансии (название роли, компанию или технологию)
-— скажи что ты frontend-разработчик с 5 годами опыта и готов скинуть резюме
-— спроси актуальна ли вакансия
-Только текст сообщения — без кавычек, заголовков и пояснений."""
 
 _CONTACT_RE = re.compile(r'(?:@([a-zA-Z0-9_]{4,32})|t\.me/([a-zA-Z0-9_]{4,32}))')
 
@@ -40,12 +32,14 @@ class ChannelHandler:
         control_bot: ControlBot,
         db,  # Database instance for updating chat settings
         llm_client: LLMClient | None = None,
+        prompt_manager: PromptManager | None = None,
     ):
         self.settings = settings
         self.client = client
         self.control_bot = control_bot
         self.db = db
         self.llm_client = llm_client
+        self.prompt_manager = prompt_manager or PromptManager(settings)
         self._contacted_path = Path("data/contacted.json")
         self._contacted: set[str] = self._load_contacted()
         self._post_times: dict[int, list[datetime]] = {}  # channel_id -> [timestamps]
@@ -81,35 +75,16 @@ class ChannelHandler:
         return True
 
     def register_handlers(self) -> None:
-        # Load channels from database
-        with self.db.get_sync_session() as session:
-            from tg_agent.storage.repositories import MonitoredChannelRepo
-            repo = MonitoredChannelRepo(session)
-            db_channels = repo.get_all()
-        
-        if not db_channels:
-            logger.info("No monitored channels configured in database")
-            return
-
-        # Convert to ChannelConfig objects
-        channel_configs = []
-        for ch in db_channels:
-            cfg = ChannelConfig(
-                channel_id=ch.channel_id,
-                title=ch.channel_title or "",
-                enabled=ch.enabled,
-                auto_outreach=ch.auto_outreach,
-                keywords=ch.keywords.split(",") if ch.keywords else [],
-                max_posts_per_hour=ch.max_posts_per_hour,
-            )
-            channel_configs.append(cfg)
-        
-        channel_ids = [cfg.channel_id for cfg in channel_configs]
+        # Keep the event subscription broad and apply the DB policy in the handler.
+        # This makes /add_channel and /remove_channel effective without a restart.
         self.client.add_event_handler(
             self._on_channel_post,
-            events.NewMessage(chats=channel_ids),
+            events.NewMessage(),
         )
-        logger.info(f"Channel handler registered for {len(channel_ids)} channel(s): {channel_ids}")
+        with self.db.get_sync_session() as session:
+            from tg_agent.storage.repositories import MonitoredChannelRepo
+            channel_count = len(MonitoredChannelRepo(session).get_all())
+        logger.info(f"Channel handler registered for {channel_count} configured channel(s)")
 
     async def _on_channel_post(self, event: events.NewMessage) -> None:
         message = event.message
@@ -139,13 +114,24 @@ class ChannelHandler:
         chat = await event.get_chat()
         channel_title = channel_config.channel_title or getattr(chat, "title", f"Channel {event.chat_id}")
 
-        # Forward to owner
+        # Truncate to 400 chars for cleaner view
+        preview_len = 400
+        text_preview = message.text[:preview_len]
+        truncated = len(message.text) > preview_len
+
+        # Build channel link (t.me/c/channel_id for private channels)
+        link_id = str(event.chat_id)
+        if link_id.startswith("-100"):
+            link_id = link_id[4:]  # Remove -100 prefix
+        channel_link = f"https://t.me/c/{link_id}/{message.id}"
+
+        # Forward to owner with link at bottom
         text = (
-            f"📢 <b>{channel_title}</b>\n\n"
-            f"{message.text[:1000]}"
+            f"{text_preview}"
+            f"{'... (обрезано)' if truncated else ''}"
+            f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📢 <b>{channel_title}</b> | <a href='{channel_link}'>оригинал</a>"
         )
-        if len(message.text) > 1000:
-            text += "\n\n<i>... (сообщение обрезано)</i>"
 
         await self.control_bot.send_message(
             chat_id=self.settings.owner_telegram_id,
@@ -156,12 +142,15 @@ class ChannelHandler:
 
         # Auto-outreach if configured and LLM is available
         if channel_config.auto_outreach and self.llm_client:
-            await self._try_outreach(message.text)
+            await self._try_outreach(message.text, event.chat_id)
 
-    async def _try_outreach(self, post_text: str) -> None:
+    async def _try_outreach(self, post_text: str, channel_id: int) -> None:
         matches = _CONTACT_RE.findall(post_text)
         usernames = [m[0] or m[1] for m in matches if m[0] or m[1]]
         usernames = list(dict.fromkeys(usernames))  # dedup
+
+        # Get outreach prompt for this channel
+        system_prompt = self.prompt_manager.get_outreach_prompt(channel_id)
 
         for username in usernames:
             if username.lower() in self._contacted:
@@ -171,7 +160,7 @@ class ChannelHandler:
             logger.info(f"Outreach: generating DM for @{username}")
             resp = await self.llm_client.generate_reply(
                 messages=[{"role": "user", "content": f"Вакансия:\n{post_text[:800]}"}],
-                system_prompt=OUTREACH_SYSTEM,
+                system_prompt=system_prompt,
             )
 
             if not resp.success or not resp.content:
@@ -181,39 +170,39 @@ class ChannelHandler:
             try:
                 sent_message = await self.client.send_message(username, resp.content)
                 chat_id = sent_message.chat_id
-                
+
                 self._contacted.add(username.lower())
                 self._save_contacted()
-                
-                # Set AUTO mode + trusted for this chat so bot can auto-reply to responses
-                logger.info(f"Outreach: saving AUTO+trusted settings for chat_id={chat_id}")
+
+                # Set DRAFT + trusted for this chat so bot prepares drafts for approval
+                logger.info(f"Outreach: saving DRAFT+trusted settings for chat_id={chat_id}")
                 with self.db.get_sync_session() as session:
                     chat_repo = ChatSettingsRepo(session)
-                    # Create or get settings with AUTO mode and trusted=True from the start
+                    # Create or get settings with DRAFT mode and trusted=True from the start
                     chat = chat_repo.get_by_chat_id(chat_id)
                     if chat is None:
                         # Create new with correct settings
                         chat = ChatSettings(
                             chat_id=chat_id,
-                            mode=ChatMode.AUTO,
+                            mode=ChatMode.DRAFT,
                             is_trusted=True,
                             chat_title=username,
                         )
                         session.add(chat)
                         session.commit()
                         session.refresh(chat)
-                        logger.info(f"Outreach: CREATED chat {chat_id} with mode=AUTO, trusted=True")
+                        logger.info(f"Outreach: CREATED chat {chat_id} with mode=DRAFT, trusted=True")
                     else:
                         # Update existing
                         old_mode = chat.mode
                         old_trusted = chat.is_trusted
-                        chat.mode = ChatMode.AUTO
+                        chat.mode = ChatMode.DRAFT
                         chat.is_trusted = True
                         chat.updated_at = datetime.utcnow()
                         session.commit()
                         session.refresh(chat)
-                        logger.info(f"Outreach: UPDATED chat {chat_id}: mode {old_mode.value}→AUTO, trusted {old_trusted}→True")
+                        logger.info(f"Outreach: UPDATED chat {chat_id}: mode {old_mode.value}→DRAFT, trusted {old_trusted}→True")
 
-                logger.info(f"Outreach: sent to @{username}: {resp.content!r} (chat {chat_id} set to AUTO+trusted)")
+                logger.info(f"Outreach: sent to @{username}: {resp.content!r} (chat {chat_id} set to DRAFT+trusted)")
             except Exception as e:
                 logger.warning(f"Outreach: failed to send to @{username}: {e}")

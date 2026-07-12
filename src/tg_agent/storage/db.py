@@ -129,11 +129,12 @@ class Database:
         try:
             settings = get_settings()
             channel_configs = settings.channel_configs
-            
-            if not channel_configs:
-                return
-            
+
             with self.get_sync_session() as session:
+                migration_key = "monitored_channels_env_migrated"
+                if session.get(GlobalState, migration_key) is not None:
+                    return
+
                 repo = MonitoredChannelRepo(session)
                 migrated = 0
                 
@@ -147,7 +148,9 @@ class Database:
                             keywords=cfg.keywords,
                         )
                         migrated += 1
-                
+
+                session.add(GlobalState(key=migration_key, value="true"))
+                session.commit()
                 if migrated > 0:
                     logger.info(f"Migrated {migrated} channel(s) from .env to database")
         except Exception as e:
