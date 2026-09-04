@@ -1,6 +1,6 @@
-"""
-Tests for policy module.
-"""
+"""Tests for policy module."""
+
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -10,8 +10,6 @@ from tg_agent.storage.models import ChatSettings
 
 
 class TestMessageFilter:
-    """Tests for MessageFilter class."""
-
     @pytest.fixture
     def filter_instance(self):
         return MessageFilter()
@@ -42,27 +40,21 @@ class TestMessageFilter:
         assert filter_instance.contains_conflict("Какая проблема?") is True
 
     def test_no_sensitive_topics(self, filter_instance):
-        text = "Привет, как дела?"
-        requires_review, reasons = filter_instance.requires_manual_review(text)
+        requires_review, reasons = filter_instance.requires_manual_review("Привет, как дела?")
         assert requires_review is False
-        assert len(reasons) == 0
+        assert reasons == []
 
     def test_is_bot_message(self, filter_instance):
-        # Bot IDs are typically in specific ranges
         assert filter_instance.is_bot_message(1500000000, via_bot=True) is True
         assert filter_instance.is_bot_message(123456, via_bot=False) is False
 
     def test_is_initiative_message(self, filter_instance):
         owner_id = 123456
-
-        # Last message from owner - not initiative
         assert filter_instance.is_initiative_message(
             sender_id=789012,
             last_message_sender_id=owner_id,
             owner_id=owner_id,
         ) is False
-
-        # Last message not from owner - initiative
         assert filter_instance.is_initiative_message(
             sender_id=789012,
             last_message_sender_id=999999,
@@ -71,8 +63,6 @@ class TestMessageFilter:
 
 
 class TestChatMode:
-    """Tests for ChatMode enum."""
-
     def test_mode_from_string(self):
         assert ChatMode.from_string("off") == ChatMode.OFF
         assert ChatMode.from_string("WATCH") == ChatMode.WATCH
@@ -91,24 +81,23 @@ class TestChatMode:
 
 
 class TestPolicyGate:
-    """Tests for PolicyGate class."""
-
     @pytest.fixture
     def mock_settings(self):
         class MockSettings:
             agent_global_enabled = True
             owner_telegram_id = 123456
             cooldown_seconds = 120
+            owner_takeover_pause_minutes = 30
             require_approval_for_unknown_chats = True
             require_approval_for_initiative_messages = True
             require_approval_for_money_or_commitments = True
             default_chat_mode = "DRAFT"
+
         return MockSettings()
 
     @pytest.fixture
     def policy_gate(self, mock_settings):
         from tg_agent.policy.cooldown import CooldownManager
-        from tg_agent.policy.filters import MessageFilter
         from tg_agent.policy.gate import PolicyGate
 
         return PolicyGate(
@@ -117,16 +106,44 @@ class TestPolicyGate:
             message_filter=MessageFilter(),
         )
 
-    def test_global_disabled(self, mock_settings):
+    def test_global_disabled_from_settings(self, mock_settings):
         mock_settings.agent_global_enabled = False
-        from tg_agent.policy.gate import CooldownManager, MessageFilter, PolicyGate
+        from tg_agent.policy.cooldown import CooldownManager
+        from tg_agent.policy.gate import PolicyGate
 
         gate = PolicyGate(mock_settings, CooldownManager(), MessageFilter())
         chat_settings = ChatSettings(chat_id=1, mode=ChatMode.AUTO)
-
         decision = gate.evaluate(chat_settings, sender_id=789, message_text="Hello")
         assert decision.should_process is False
         assert decision.action == "ignore"
+
+    def test_runtime_state_overrides_env(self, policy_gate):
+        chat_settings = ChatSettings(chat_id=1, mode=ChatMode.AUTO, is_trusted=True)
+        decision = policy_gate.evaluate(
+            chat_settings,
+            sender_id=789,
+            message_text="Hello",
+            last_message_sender_id=123456,
+            agent_enabled=False,
+        )
+        assert decision.action == "ignore"
+        assert "globally disabled" in decision.reason
+
+    def test_owner_takeover_pause(self, policy_gate):
+        chat_settings = ChatSettings(
+            chat_id=1,
+            mode=ChatMode.AUTO,
+            is_trusted=True,
+            paused_until=datetime.utcnow() + timedelta(minutes=5),
+        )
+        decision = policy_gate.evaluate(
+            chat_settings,
+            sender_id=789,
+            message_text="Hello",
+            last_message_sender_id=123456,
+        )
+        assert decision.action == "ignore"
+        assert "Owner takeover" in decision.reason
 
     def test_chat_mode_off(self, policy_gate):
         chat_settings = ChatSettings(chat_id=1, mode=ChatMode.OFF)
@@ -138,7 +155,7 @@ class TestPolicyGate:
         chat_settings = ChatSettings(chat_id=1, mode=ChatMode.AUTO)
         decision = policy_gate.evaluate(
             chat_settings,
-            sender_id=123456,  # Owner ID
+            sender_id=123456,
             message_text="Hello",
         )
         assert decision.should_process is False
@@ -160,7 +177,7 @@ class TestPolicyGate:
         chat_settings = ChatSettings(chat_id=1, mode=ChatMode.AUTO, is_trusted=False)
         decision = policy_gate.evaluate(chat_settings, sender_id=789, message_text="Hello")
         assert decision.should_process is True
-        assert decision.action == "draft"  # Falls back to draft
+        assert decision.action == "draft"
 
     def test_auto_mode_trusted_safe_message(self, policy_gate):
         chat_settings = ChatSettings(chat_id=1, mode=ChatMode.AUTO, is_trusted=True)
@@ -168,10 +185,26 @@ class TestPolicyGate:
             chat_settings,
             sender_id=789,
             message_text="Привет, как дела?",
-            last_message_sender_id=123456,  # Owner last message
+            last_message_sender_id=123456,
         )
         assert decision.should_process is True
         assert decision.action == "auto_reply"
+
+    def test_auto_mode_uses_persisted_cooldown(self, policy_gate):
+        chat_settings = ChatSettings(
+            chat_id=1,
+            mode=ChatMode.AUTO,
+            is_trusted=True,
+            last_agent_reply_at=datetime.utcnow() - timedelta(seconds=30),
+        )
+        decision = policy_gate.evaluate(
+            chat_settings,
+            sender_id=789,
+            message_text="ещё вопрос",
+            last_message_sender_id=123456,
+        )
+        assert decision.action == "ignore"
+        assert decision.reason == "In cooldown period"
 
     def test_auto_mode_with_money_topic(self, policy_gate):
         chat_settings = ChatSettings(chat_id=1, mode=ChatMode.AUTO, is_trusted=True)
@@ -181,4 +214,4 @@ class TestPolicyGate:
             message_text="Переведи мне 500 рублей",
         )
         assert decision.should_process is True
-        assert decision.action == "draft"  # Requires approval for money topics
+        assert decision.action == "draft"

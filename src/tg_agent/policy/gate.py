@@ -34,10 +34,8 @@ class PolicyGate:
     """
     Main policy decision engine.
 
-    Evaluates incoming messages and decides:
-    - Whether to process them
-    - What action to take (ignore, notify, draft, auto-reply)
-    - Whether approval is required
+    The gate is intentionally deterministic. The LLM generates text; it never
+    decides whether a message may be sent automatically.
     """
 
     def __init__(
@@ -46,14 +44,6 @@ class PolicyGate:
         cooldown_manager: CooldownManager | None = None,
         message_filter: MessageFilter | None = None,
     ):
-        """
-        Initialize policy gate.
-
-        Args:
-            settings: Application settings.
-            cooldown_manager: Cooldown manager instance.
-            message_filter: Message filter instance.
-        """
         self.settings = settings
         self.cooldown_manager = cooldown_manager or CooldownManager(
             settings.cooldown_seconds
@@ -68,29 +58,35 @@ class PolicyGate:
         message_text: str,
         is_reply_to_owner: bool = False,
         last_message_sender_id: int | None = None,
+        agent_enabled: bool | None = None,
     ) -> PolicyDecision:
-        """
-        Evaluate message and return policy decision.
-
-        Args:
-            chat_settings: Chat settings from DB.
-            sender_id: Message sender ID.
-            message_text: Message text.
-            is_reply_to_owner: Whether this is a reply to owner's message.
-            last_message_sender_id: ID of last message sender in chat.
-
-        Returns:
-            PolicyDecision with action recommendation.
-        """
-        # Check global enable state
-        if not self.settings.agent_global_enabled:
+        """Evaluate an incoming message and return a deterministic action."""
+        # Runtime state in SQLite is the source of truth. The env value is only
+        # a bootstrap default and remains the fallback for tests/standalone use.
+        enabled = (
+            self.settings.agent_global_enabled
+            if agent_enabled is None
+            else agent_enabled
+        )
+        if not enabled:
             return PolicyDecision(
                 should_process=False,
                 action="ignore",
                 reason="Agent globally disabled",
             )
 
-        # Check chat mode
+        # Owner takeover: if the owner has recently interacted manually in this
+        # chat, keep the automation out until the pause expires.
+        if (
+            chat_settings.paused_until is not None
+            and datetime.utcnow() < chat_settings.paused_until
+        ):
+            return PolicyDecision(
+                should_process=False,
+                action="ignore",
+                reason=f"Owner takeover until {chat_settings.paused_until.isoformat()}",
+            )
+
         mode = chat_settings.mode
         if mode == ChatMode.OFF:
             return PolicyDecision(
@@ -99,7 +95,6 @@ class PolicyGate:
                 reason="Chat mode is OFF",
             )
 
-        # Don't process owner's own messages
         if sender_id == self.owner_id:
             return PolicyDecision(
                 should_process=False,
@@ -107,7 +102,6 @@ class PolicyGate:
                 reason="Message from owner",
             )
 
-        # Don't process bot messages
         if self.message_filter.is_bot_message(sender_id):
             return PolicyDecision(
                 should_process=False,
@@ -115,12 +109,10 @@ class PolicyGate:
                 reason="Message from bot",
             )
 
-        # Check if this is an initiative message (first in conversation)
         is_initiative = self.message_filter.is_initiative_message(
             sender_id, last_message_sender_id, self.owner_id
         )
 
-        # Check for sensitive topics requiring manual review
         requires_review, review_reasons = self.message_filter.requires_manual_review(
             message_text,
             require_money=self.settings.require_approval_for_money_or_commitments,
@@ -128,7 +120,6 @@ class PolicyGate:
             require_personal=self.settings.require_approval_for_money_or_commitments,
         )
 
-        # Mode-specific logic
         if mode == ChatMode.WATCH:
             return PolicyDecision(
                 should_process=True,
@@ -138,7 +129,6 @@ class PolicyGate:
             )
 
         if mode == ChatMode.DRAFT:
-            # Always require approval in DRAFT mode
             return PolicyDecision(
                 should_process=True,
                 action="draft",
@@ -147,28 +137,30 @@ class PolicyGate:
             )
 
         if mode == ChatMode.AUTO:
-
-            # Check cooldown
-            if not self.cooldown_manager.can_reply(chat_settings.chat_id):
+            if not self.cooldown_manager.can_reply(
+                chat_settings.chat_id,
+                last_reply_at=chat_settings.last_agent_reply_at,
+            ):
                 return PolicyDecision(
                     should_process=False,
                     action="ignore",
                     reason="In cooldown period",
                 )
 
-            # Check for sensitive topics
-            if requires_review:
+            if (
+                self.settings.require_approval_for_unknown_chats
+                and not chat_settings.is_trusted
+            ):
                 return PolicyDecision(
                     should_process=True,
                     action="draft",
-                    reason=f"Sensitive topics detected: {', '.join(review_reasons)}",
+                    reason="AUTO mode requires trusted chat",
                     requires_approval=True,
                 )
 
-            # In AUTO mode initiative check is skipped — user set AUTO explicitly
-            if False and (
-                is_initiative
-                and self.settings.require_approval_for_initiative_messages
+            if (
+                self.settings.require_approval_for_initiative_messages
+                and is_initiative
             ):
                 return PolicyDecision(
                     should_process=True,
@@ -177,15 +169,24 @@ class PolicyGate:
                     requires_approval=True,
                 )
 
-            # All checks passed - can auto-reply
+            if requires_review:
+                return PolicyDecision(
+                    should_process=True,
+                    action="draft",
+                    reason=(
+                        "Sensitive topic requires approval: "
+                        + ", ".join(review_reasons)
+                    ),
+                    requires_approval=True,
+                )
+
             return PolicyDecision(
                 should_process=True,
                 action="auto_reply",
-                reason="AUTO mode, trusted chat, no restrictions",
+                reason="AUTO mode",
                 requires_approval=False,
             )
 
-        # Unknown mode - default to draft
         return PolicyDecision(
             should_process=True,
             action="draft",
@@ -194,12 +195,7 @@ class PolicyGate:
         )
 
     def get_pause_until(self) -> datetime:
-        """
-        Get pause until time after owner activity.
-
-        Returns:
-            Datetime until which agent should pause.
-        """
+        """Return the owner-takeover pause deadline for a manual owner action."""
         return datetime.utcnow() + timedelta(
             minutes=self.settings.owner_takeover_pause_minutes
         )

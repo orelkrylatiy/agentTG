@@ -2,14 +2,22 @@
 Application configuration using pydantic-settings.
 """
 
-from functools import lru_cache
+from __future__ import annotations
+
 import os
+import re
+from functools import lru_cache
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from tg_agent.logging import get_logger
+
+if TYPE_CHECKING:
+    from tg_agent.userbot.channel_config import ChannelConfig
 
 
 class Settings(BaseSettings):
@@ -47,9 +55,7 @@ class Settings(BaseSettings):
     owner_telegram_id: int = Field(..., alias="OWNER_TELEGRAM_ID")
 
     # Database
-    database_url: str = Field(
-        default="sqlite:///./data/agent.db", alias="DATABASE_URL"
-    )
+    database_url: str = Field(default="sqlite:///./data/agent.db", alias="DATABASE_URL")
 
     # Agent state
     agent_global_enabled: bool = Field(default=False, alias="AGENT_GLOBAL_ENABLED")
@@ -63,16 +69,12 @@ class Settings(BaseSettings):
     )
     llm_model: str = Field(default="chatgpt/gpt-5", alias="LLM_MODEL")
     litellm_chatgpt_enabled: bool = Field(default=True, alias="LITELLM_CHATGPT_ENABLED")
-    chatgpt_token_dir: str = Field(
-        default="data/litellm/chatgpt", alias="CHATGPT_TOKEN_DIR"
-    )
+    chatgpt_token_dir: str = Field(default="data/litellm/chatgpt", alias="CHATGPT_TOKEN_DIR")
     chatgpt_auth_file: str = Field(default="auth.json", alias="CHATGPT_AUTH_FILE")
     chatgpt_api_base: str = Field(
         default="https://chatgpt.com/backend-api/codex", alias="CHATGPT_API_BASE"
     )
-    chatgpt_originator: str = Field(
-        default="codex_cli_rs", alias="CHATGPT_ORIGINATOR"
-    )
+    chatgpt_originator: str = Field(default="codex_cli_rs", alias="CHATGPT_ORIGINATOR")
 
     # Fallback providers
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
@@ -96,23 +98,69 @@ class Settings(BaseSettings):
     max_context_messages: int = Field(default=12, alias="MAX_CONTEXT_MESSAGES")
     max_reply_chars: int = Field(default=800, alias="MAX_REPLY_CHARS")
 
+    # Startup catch-up
+    startup_catchup_enabled: bool = Field(default=False, alias="STARTUP_CATCHUP_ENABLED")
+    startup_catchup_dialog_limit: int = Field(default=50, alias="STARTUP_CATCHUP_DIALOG_LIMIT")
+    startup_catchup_messages_per_chat: int = Field(
+        default=20, alias="STARTUP_CATCHUP_MESSAGES_PER_CHAT"
+    )
+    startup_catchup_auto_reply_max_age_minutes: int = Field(
+        default=15, alias="STARTUP_CATCHUP_AUTO_REPLY_MAX_AGE_MINUTES"
+    )
+
     # Channel monitoring
     monitored_channels: str = Field(default="", alias="MONITORED_CHANNELS")
 
     @property
     def monitored_channel_ids(self) -> list[int]:
-        """Parse MONITORED_CHANNELS into list of int IDs."""
+        """Parse MONITORED_CHANNELS into list of int IDs (legacy format)."""
         if not self.monitored_channels:
             return []
         result = []
-        for part in self.monitored_channels.split(","):
+        for part in self._channel_specs():
             part = part.strip()
             if part:
                 try:
-                    result.append(int(part))
+                    channel_id = int(part.split(":")[0])
+                    result.append(channel_id)
                 except ValueError:
                     pass
         return result
+
+    @property
+    def channel_configs(self) -> list[ChannelConfig]:
+        """Parse MONITORED_CHANNELS into list of ChannelConfig objects."""
+        from tg_agent.userbot.channel_config import ChannelConfig
+
+        if not self.monitored_channels:
+            return []
+        result = []
+        for part in self._channel_specs():
+            part = part.strip()
+            if part:
+                try:
+                    config = ChannelConfig.from_string(part)
+                    if config.enabled:
+                        result.append(config)
+                except ValueError as exc:
+                    logger = get_logger(__name__)
+                    logger.warning(f"Skipping invalid channel config '{part}': {exc}")
+        return result
+
+    def _channel_specs(self) -> list[str]:
+        """Split channel specs without treating keyword commas as separators."""
+        return [
+            part.strip()
+            for part in re.split(r"[;]|,\s*(?=-?\d+(?::|$))", self.monitored_channels)
+            if part.strip()
+        ]
+
+    def get_channel_config(self, channel_id: int) -> ChannelConfig | None:
+        """Get configuration for a specific channel by ID."""
+        for config in self.channel_configs:
+            if config.channel_id == channel_id:
+                return config
+        return None
 
     # Safety settings
     require_approval_for_unknown_chats: bool = Field(
@@ -198,7 +246,11 @@ class Settings(BaseSettings):
     def chatgpt_token_dir_path(self) -> Path:
         """Return the effective LiteLLM ChatGPT token directory."""
         token_dir = Path(os.path.expanduser(self.chatgpt_token_dir))
-        resolved = token_dir.resolve() if token_dir.is_absolute() else (self.project_root / token_dir).resolve()
+        resolved = (
+            token_dir.resolve()
+            if token_dir.is_absolute()
+            else (self.project_root / token_dir).resolve()
+        )
         if not resolved.is_relative_to(self.project_root):
             raise ValueError("CHATGPT_TOKEN_DIR must stay inside the project root")
         return resolved

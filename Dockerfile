@@ -2,26 +2,22 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only requirements first for better caching
-COPY pyproject.toml .
+# Copy the package metadata and source before installing the project.
+# The previous Dockerfile attempted `pip install .` before README.md/src existed.
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --no-cache-dir .
 
-# Install dependencies
-RUN pip install --no-cache-dir ".[dev]"
-
-# Copy application code
+# Runtime files: prompts, helper scripts and configuration examples.
 COPY . .
 
-# Create data directory for session and database
 RUN mkdir -p /app/data
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Default command
 CMD ["python", "-m", "tg_agent.main"]

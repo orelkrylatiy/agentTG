@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 install *)",
+      "Bash(which *)",
+      "Bash(ruff *)",
+      "Bash(echo *)",
+      "Bash(nessy *)",
+      "Agent(general-purpose)",
+      "Bash(pgrep *)",
+      "Bash(sleep *)",
+      "Bash(nohup *)",
+      "Bash(sqlite3 *)",
+      "Bash(true)"
+    ]
+  },
+  "$version": 4
+}

@@ -4,15 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-ai-userbot-agent"
-version = "0.1.0"
-description = "Personal Telegram AI userbot agent with control bot and HITL"
+version = "0.2.0"
+description = "Telegram execution layer with AI replies, workflows, HITL and MCP"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [
-    {name = "Your Name", email = "your.email@example.com"}
-]
-keywords = ["telegram", "ai", "userbot", "telethon", "aiogram", "llm"]
+keywords = ["telegram", "ai", "userbot", "telethon", "aiogram", "llm", "mcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -32,6 +29,8 @@ dependencies = [
     "pydantic-settings>=2.1.0",
     "loguru>=0.7.2",
     "aiofiles>=23.2.1",
+    "mcp>=2.0.0,<3",
+    "uvicorn>=0.30.0",
 ]
 
 [project.optional-dependencies]
@@ -45,8 +44,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/telegram-ai-userbot-agent"
-Repository = "https://github.com/yourusername/telegram-ai-userbot-agent.git"
+Homepage = "https://github.com/orelkrylatiy/agentTG"
+Repository = "https://github.com/orelkrylatiy/agentTG.git"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -64,8 +63,10 @@ target-version = ["py311", "py312"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
-ignore = ["E501"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B"]
+ignore = ["E501", "F841"]
 
 [tool.mypy]
 python_version = "3.11"

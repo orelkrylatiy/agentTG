@@ -41,8 +41,12 @@ ENV/
 # Session files (Telethon)
 *.session
 *.session-journal
+*.session-shm
+*.session-wal
 data/*.session
 data/*.session-journal
+data/*.session-shm
+data/*.session-wal
 
 # Database
 *.db
@@ -51,9 +55,22 @@ data/*.session-journal
 data/*.db
 data/*.sqlite
 
+# Secrets / provider credentials
+data/litellm/**/auth.json
+data/litellm/**/*token*
+
+# Login helper/runtime state
+data/.login_hash
+data/.login_state.json
+
+# Runtime state
+# Outreach/contact state belongs in SQLite. Ignore legacy JSON if present locally.
+data/contacted.json
+
 # Logs
 logs/
 *.log
+nohup.out
 
 # OS
 .DS_Store

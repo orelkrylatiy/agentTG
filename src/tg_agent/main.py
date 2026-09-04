@@ -13,6 +13,10 @@ from tg_agent.config import Settings, get_settings
 from tg_agent.control_bot import ControlBot, HITLManager
 from tg_agent.control_bot.handlers import setup_control_handlers
 from tg_agent.logging import get_logger, setup_logging
+from tg_agent.mcp_config import MCPConfig
+from tg_agent.mcp_server import MCPRuntime
+from tg_agent.services.telegram import TelegramService
+from tg_agent.skills.registry import SkillRunner
 from tg_agent.storage.db import get_db
 from tg_agent.userbot import UserbotClient
 from tg_agent.userbot.channel_handler import ChannelHandler
@@ -22,67 +26,44 @@ logger = get_logger(__name__)
 
 
 class Agent:
-    """
-    Main agent orchestrator.
-
-    Manages lifecycle of:
-    - Telethon userbot
-    - aiogram control bot
-    - Database
-    - LLM client
-    """
+    """Main process orchestrator for Telegram, control bot and MCP."""
 
     def __init__(self, settings: Settings):
-        """
-        Initialize agent.
-
-        Args:
-            settings: Application settings.
-        """
         self.settings = settings
+        self.mcp_config = MCPConfig.from_env()
         self.db = get_db(
             settings.database_url,
             default_agent_enabled=settings.agent_global_enabled,
             default_chat_mode=settings.default_chat_mode,
         )
 
-        # Initialize components
         self.userbot = UserbotClient(settings)
         self.control_bot = ControlBot(settings)
         self.llm_client = LLMClient(settings)
+        from tg_agent.agent.prompts import PromptManager
 
-        # Shutdown flag
+        self.prompt_manager = PromptManager(settings)
+
+        self.telegram_service: TelegramService | None = None
+        self.skill_runner: SkillRunner | None = None
+        self.mcp_runtime: MCPRuntime | None = None
         self._shutdown = False
 
     async def initialize(self) -> None:
-        """Initialize all components."""
+        """Initialize all components and register all control surfaces."""
         logger.info("Initializing agent components...")
 
-        # Setup logging
         setup_logging(self.settings)
 
-        # Initialize database
         await self.db.init_db()
         logger.info("Database initialized")
 
-        # Initialize control bot
         await self.control_bot.start()
         logger.info("Control bot initialized")
 
-        # Setup control bot handlers
-        setup_control_handlers(
-            dp=self.control_bot.dispatcher,
-            settings=self.settings,
-            db=self.db,
-            control_bot=self.control_bot,
-            userbot_client=self.userbot.client,
-        )
-
-        # Initialize userbot
         await self.userbot.start()
         logger.info("Userbot initialized")
 
-        # Create message sender for HITL
         from tg_agent.humanizer.delays import TypingDelaySimulator
         from tg_agent.userbot.sender import MessageSender
 
@@ -91,7 +72,6 @@ class Agent:
             TypingDelaySimulator(),
         )
 
-        # Setup HITL manager
         hitl_manager = HITLManager(
             settings=self.settings,
             db=self.db,
@@ -100,54 +80,90 @@ class Agent:
         )
         hitl_manager.register_handlers(self.control_bot.dispatcher)
 
-        # Setup incoming message handlers
-        setup_incoming_handlers(
+        incoming_handler = setup_incoming_handlers(
             settings=self.settings,
             db=self.db,
             client=self.userbot.client,
             control_bot=self.control_bot,
             llm_client=self.llm_client,
+            prompt_manager=self.prompt_manager,
         )
 
-        # Setup channel monitoring
         channel_handler = ChannelHandler(
             settings=self.settings,
             client=self.userbot.client,
             control_bot=self.control_bot,
+            db=self.db,
             llm_client=self.llm_client,
+            prompt_manager=self.prompt_manager,
         )
         channel_handler.register_handlers()
 
-        # LLM health check
+        setup_control_handlers(
+            dp=self.control_bot.dispatcher,
+            settings=self.settings,
+            db=self.db,
+            control_bot=self.control_bot,
+            userbot_client=self.userbot.client,
+            incoming_handler=incoming_handler,
+            channel_handler=channel_handler,
+        )
+
+        self.telegram_service = TelegramService(
+            settings=self.settings,
+            client=self.userbot.client,
+            db=self.db,
+            llm_client=self.llm_client,
+            prompt_manager=self.prompt_manager,
+        )
+        self.skill_runner = SkillRunner(
+            telegram=self.telegram_service,
+            db=self.db,
+            outreach_callable=channel_handler._try_outreach,
+            allow_writes=self.mcp_config.allow_writes,
+        )
+        if self.mcp_config.enabled:
+            self.mcp_runtime = MCPRuntime(
+                config=self.mcp_config,
+                telegram=self.telegram_service,
+                skills=self.skill_runner,
+            )
+            logger.info(
+                f"MCP enabled on http://{self.mcp_config.host}:"
+                f"{self.mcp_config.port}/mcp"
+            )
+        else:
+            logger.info("MCP server disabled")
+
         logger.info("Checking LLM connectivity...")
         llm_test = await self.llm_client.smoke_test()
         if llm_test.success:
             logger.info(f"LLM OK — {llm_test.provider.value} / {llm_test.model}")
         else:
-            logger.warning(f"LLM UNAVAILABLE — {llm_test.error_message}. Agent will start but replies will fail until LLM is up.")
+            logger.warning(
+                f"LLM UNAVAILABLE — {llm_test.error_message}. "
+                "Agent will start but LLM-backed tools will fail until it is up."
+            )
 
         logger.info("All components initialized successfully")
 
     async def run(self) -> None:
-        """
-        Run the agent.
-
-        Runs both userbot and control bot concurrently.
-        """
+        """Run Telegram, control bot and embedded MCP concurrently."""
         logger.info("Starting agent...")
 
-        # Create tasks for both bots
-        userbot_task = asyncio.create_task(self._run_userbot())
-        control_bot_task = asyncio.create_task(self._run_control_bot())
+        tasks = [
+            asyncio.create_task(self._run_userbot()),
+            asyncio.create_task(self._run_control_bot()),
+        ]
+        if self.mcp_runtime is not None:
+            tasks.append(asyncio.create_task(self._run_mcp()))
 
-        # Wait for shutdown signal
         try:
-            await asyncio.gather(userbot_task, control_bot_task)
+            await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info("Agent tasks cancelled")
 
     async def _run_userbot(self) -> None:
-        """Run userbot event loop."""
         logger.info("Userbot event loop started")
         try:
             await self.userbot.client.run_until_disconnected()
@@ -157,7 +173,6 @@ class Agent:
             logger.info("Userbot event loop stopped")
 
     async def _run_control_bot(self) -> None:
-        """Run control bot polling."""
         logger.info("Control bot polling started")
         try:
             await self.control_bot.dispatcher.start_polling(
@@ -169,16 +184,29 @@ class Agent:
         finally:
             logger.info("Control bot polling stopped")
 
-    async def shutdown(self) -> None:
-        """Graceful shutdown."""
-        logger.info("Shutting down agent...")
+    async def _run_mcp(self) -> None:
+        if self.mcp_runtime is None:
+            return
+        logger.info("MCP event loop started")
+        try:
+            await self.mcp_runtime.serve()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            logger.info("MCP event loop stopped")
 
+    async def shutdown(self) -> None:
+        """Gracefully stop every network surface."""
+        if self._shutdown:
+            return
+
+        logger.info("Shutting down agent...")
         self._shutdown = True
 
-        # Stop control bot
-        await self.control_bot.stop()
+        if self.mcp_runtime is not None:
+            await self.mcp_runtime.stop()
 
-        # Stop userbot
+        await self.control_bot.stop()
         await self.userbot.stop()
 
         logger.info("Agent shutdown complete")
@@ -186,7 +214,6 @@ class Agent:
 
 async def main() -> None:
     """Main entry point."""
-    # Load settings
     try:
         settings = get_settings()
     except Exception as e:
@@ -197,20 +224,16 @@ async def main() -> None:
         print("  - OWNER_TELEGRAM_ID")
         sys.exit(1)
 
-    # Validate settings
     if settings.tg_api_hash == "replace_me" or settings.control_bot_token == "replace_me":
         print("❌ Please fill in required values in .env file", file=sys.stderr)
         print("  - TG_API_HASH")
         print("  - CONTROL_BOT_TOKEN")
         sys.exit(1)
 
-    # Create agent
     agent = Agent(settings)
-
-    # Setup signal handlers
     loop = asyncio.get_event_loop()
 
-    def signal_handler():
+    def signal_handler() -> None:
         logger.info("Received shutdown signal")
         asyncio.create_task(agent.shutdown())
 
@@ -218,12 +241,8 @@ async def main() -> None:
         loop.add_signal_handler(sig, signal_handler)
 
     try:
-        # Initialize
         await agent.initialize()
-
-        # Run
         await agent.run()
-
     except Exception as e:
         logger.exception(f"Agent error: {e}")
         await agent.shutdown()

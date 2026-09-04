@@ -1,5 +1,7 @@
 """Command handlers for control bot."""
 
+from typing import Any
+
 from aiogram import F, Dispatcher, Router, types
 from aiogram.filters import Command, CommandObject, CommandStart
 from telethon import TelegramClient
@@ -13,6 +15,7 @@ from tg_agent.storage.repositories import (
     ChatSettingsRepo,
     GlobalStateRepo,
     MessageLogRepo,
+    MonitoredChannelRepo,
     PendingActionRepo,
 )
 
@@ -29,6 +32,8 @@ def setup_control_handlers(
     db: Database,
     control_bot: ControlBot,
     userbot_client: TelegramClient | None = None,
+    incoming_handler: Any | None = None,
+    channel_handler=None,
 ) -> None:
     """
     Set up all control bot command handlers.
@@ -98,6 +103,31 @@ def setup_control_handlers(
     async def style_handler(message: types.Message) -> None:
         await cmd_style(message, settings)
 
+    @router.message(Command("persona"))
+    async def persona_handler(
+        message: types.Message,
+        command: CommandObject | None = None,
+    ) -> None:
+        await cmd_persona(message, settings, _command_args(command))
+
+    @router.message(Command("channels"))
+    async def channels_handler(message: types.Message) -> None:
+        await cmd_channels(message, settings, db)
+
+    @router.message(Command("add_channel"))
+    async def add_channel_handler(
+        message: types.Message,
+        command: CommandObject | None = None,
+    ) -> None:
+        await cmd_add_channel(message, settings, userbot_client, db, _command_args(command))
+
+    @router.message(Command("remove_channel"))
+    async def remove_channel_handler(
+        message: types.Message,
+        command: CommandObject | None = None,
+    ) -> None:
+        await cmd_remove_channel(message, settings, db, _command_args(command), userbot_client)
+
     @router.message(Command("help"))
     async def help_handler(message: types.Message) -> None:
         await cmd_help(message)
@@ -107,7 +137,19 @@ def setup_control_handlers(
         message: types.Message,
         command: CommandObject | None = None,
     ) -> None:
-        await cmd_scan_channel(message, settings, control_bot, userbot_client, _command_args(command))
+        await cmd_scan_channel(
+            message,
+            settings,
+            db,
+            control_bot,
+            userbot_client,
+            _command_args(command),
+            channel_handler,
+        )
+
+    @router.message(Command("catchup"))
+    async def catchup_handler(message: types.Message) -> None:
+        await cmd_catchup(message, incoming_handler)
 
     dp.include_router(router)
 
@@ -221,7 +263,7 @@ async def cmd_mode(message: types.Message, db: Database, args: str) -> None:
     parts = args.strip().split()
     if len(parts) < 2:
         await message.answer(
-            "❌ Usage: /mode <chat_id_or_title> <OFF|WATCH|DRAFT|AUTO>\n"
+            "❌ Usage: /mode &lt;chat_id_or_title&gt; &lt;OFF|WATCH|DRAFT|AUTO&gt;\n"
             "Example: /mode 12345 DRAFT"
         )
         return
@@ -269,7 +311,7 @@ async def cmd_trust(message: types.Message, db: Database, args: str) -> None:
     """Handle /trust command."""
     chat_identifier = args.strip()
     if not chat_identifier:
-        await message.answer("❌ Usage: /trust <chat_id_or_title>")
+        await message.answer("❌ Usage: /trust &lt;chat_id_or_title&gt;")
         return
 
     with db.get_sync_session() as session:
@@ -297,7 +339,7 @@ async def cmd_untrust(message: types.Message, db: Database, args: str) -> None:
     """Handle /untrust command."""
     chat_identifier = args.strip()
     if not chat_identifier:
-        await message.answer("❌ Usage: /untrust <chat_id_or_title>")
+        await message.answer("❌ Usage: /untrust &lt;chat_id_or_title&gt;")
         return
 
     with db.get_sync_session() as session:
@@ -326,7 +368,7 @@ async def cmd_send(message: types.Message, db: Database, args: str, control_bot:
     # Parse: /send <chat_id> <message>
     parts = args.strip().split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("❌ Usage: /send <chat_id> <message text>")
+        await message.answer("❌ Usage: /send &lt;chat_id&gt; &lt;message text&gt;")
         return
 
     chat_identifier = parts[0]
@@ -410,32 +452,76 @@ async def cmd_style(message: types.Message, settings: Settings) -> None:
     await message.answer(text, parse_mode="HTML")
 
 
+async def cmd_persona(message: types.Message, settings: Settings, args: str) -> None:
+    """Handle /persona [text] — view or update the persona prompt."""
+    persona_file = settings.prompts_dir / "persona.ru.txt"
+    if args:
+        persona_file.write_text(args.strip(), encoding="utf-8")
+        await message.answer("✅ Персона обновлена. Вступает в силу сразу, без рестарта.")
+    else:
+        current = persona_file.read_text(encoding="utf-8").strip() if persona_file.exists() else "(не задана)"
+        await message.answer(
+            f"👤 <b>Текущая персона:</b>\n<pre>{current}</pre>\n\n"
+            "Чтобы изменить: <code>/persona Меня зовут ...</code>",
+            parse_mode="HTML",
+        )
+
+
 async def cmd_scan_channel(
     message: types.Message,
     settings: Settings,
+    db: Database,
     control_bot: ControlBot,
     client: TelegramClient | None,
     args: str,
+    channel_handler=None,
 ) -> None:
-    """Handle /scan_channel [limit] — fetch recent posts from monitored channels."""
+    """Scan recent posts and optionally run configured per-channel outreach."""
     if not client:
         await message.answer("❌ Userbot client not available.")
         return
 
-    channel_ids = settings.monitored_channel_ids
-    if not channel_ids:
-        await message.answer("❌ No channels configured in MONITORED_CHANNELS.")
+    with db.get_sync_session() as session:
+        channels = MonitoredChannelRepo(session).get_all()
+
+    if not channels:
+        # Legacy fallback for installs that still keep channels only in MONITORED_CHANNELS.
+        channels = settings.channel_configs
+
+    if not channels:
+        await message.answer("❌ No monitored channels configured.")
         return
 
-    try:
-        limit = max(1, min(int(args), 50)) if args.isdigit() else 10
-    except Exception:
-        limit = 10
+    # Parse arguments: [limit] [ON|OFF]
+    parts = args.strip().split()
+    limit = 10
+    outreach_mode = None  # None/ON = use channel config, OFF = disable outreach
 
-    await message.answer(f"🔍 Scanning {len(channel_ids)} channel(s), last {limit} posts...")
+    for part in parts:
+        if part.isdigit():
+            limit = max(1, min(int(part), 50))
+        elif part.upper() == "ON":
+            outreach_mode = True
+        elif part.upper() == "OFF":
+            outreach_mode = False
+
+    # Outreach is always constrained by the channel's persisted auto_outreach flag.
+    # ON enables configured outreach; it must not turn monitor-only channels into DM sources.
+    base_outreach_available = channel_handler is not None and channel_handler.llm_client is not None
+
+    await message.answer(
+        f"🔍 Сканирую {len(channels)} канал(ов), последние {limit} постов"
+        + (" + обработаю настроенный аутрич" if base_outreach_available and outreach_mode is not False else " (без аутрича)") + "..."
+    )
 
     total = 0
-    for channel_id in channel_ids:
+    outreach_count = 0
+    for channel in channels:
+        channel_id = channel.channel_id
+        channel_keywords = [keyword.strip().lower() for keyword in (channel.keywords or [])]
+        if isinstance(channel.keywords, str):
+            channel_keywords = [keyword.strip().lower() for keyword in channel.keywords.split(",")]
+        channel_auto_outreach = bool(channel.auto_outreach)
         try:
             msgs = await client.get_messages(channel_id, limit=limit)
             chat = await client.get_entity(channel_id)
@@ -444,44 +530,384 @@ async def cmd_scan_channel(
             for msg in reversed(msgs):
                 if not msg.text:
                     continue
+
+                if channel_keywords and not any(keyword in msg.text.lower() for keyword in channel_keywords):
+                    continue
+
+                # Truncate to 400 chars for cleaner view
+                preview_len = 400
+                text_preview = msg.text[:preview_len]
+                truncated = len(msg.text) > preview_len
+
+                # Build channel link (t.me/c/channel_id for private channels)
+                link_id = str(channel_id)
+                if link_id.startswith("-100"):
+                    link_id = link_id[4:]  # Remove -100 prefix
+                channel_link = f"https://t.me/c/{link_id}/{msg.id}"
+
                 text = (
-                    f"📢 <b>{title}</b> (история)\n\n"
-                    f"{msg.text[:1000]}"
+                    f"{text_preview}"
+                    f"{'... (обрезано)' if truncated else ''}"
+                    f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📢 <b>{title}</b> | <a href='{channel_link}'>оригинал</a>"
                 )
-                if len(msg.text) > 1000:
-                    text += "\n\n<i>... (обрезано)</i>"
+
                 await control_bot.send_message(
                     chat_id=settings.owner_telegram_id,
                     text=text,
                     parse_mode="HTML",
                 )
                 total += 1
-        except Exception as e:
-            await message.answer(f"❌ Error scanning {channel_id}: {e}")
 
-    await message.answer(f"✅ Готово — переслано {total} постов.")
+                do_outreach = (
+                    base_outreach_available
+                    and channel_auto_outreach
+                    and outreach_mode is not False
+                )
+                if do_outreach:
+                    before = len(channel_handler._contacted)
+                    await channel_handler._try_outreach(msg.text, channel_id)
+                    outreach_count += len(channel_handler._contacted) - before
+
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сканировании {channel_id}: {e}")
+
+    summary = f"✅ Переслано {total} постов."
+    if base_outreach_available and outreach_mode is not False:
+        summary += f" Написал {outreach_count} новым контактам."
+    await message.answer(summary)
+
+
+async def cmd_catchup(message: types.Message, incoming_handler: Any | None) -> None:
+    """Handle /catchup — manually process missed messages."""
+    if incoming_handler is None:
+        await message.answer("❌ Incoming handler unavailable.")
+        return
+
+    await message.answer("🔄 Запускаю ручной catch-up пропущенных сообщений...")
+    processed = await incoming_handler.catch_up_missed_messages(force=True)
+    if processed:
+        await message.answer(f"✅ Catch-up завершён. Обработано чатов: {processed}.")
+    else:
+        await message.answer("✅ Catch-up завершён. Новых пропущенных сообщений не найдено.")
 
 
 async def cmd_help(message: types.Message) -> None:
-    """Handle /help command."""
+    """Handle /help command — detailed API reference."""
     text = (
-        "🤖 <b>Available Commands:</b>\n\n"
-        "📊 <b>Status:</b>\n"
-        "  /status - Show agent status\n"
-        "  /pause - Pause agent\n"
-        "  /resume - Resume agent\n\n"
-        "💬 <b>Chats:</b>\n"
-        "  /chats - List configured chats\n"
-        "  /mode <chat> <mode> - Set chat mode (OFF/WATCH/DRAFT/AUTO)\n"
-        "  /trust <chat> - Mark chat as trusted\n"
-        "  /untrust <chat> - Remove trusted status\n\n"
-        "✏️ <b>Actions:</b>\n"
-        "  /send <chat> <msg> - Send message (requires approval)\n"
-        "  /recent - Show recent actions\n\n"
-        "📢 <b>Каналы:</b>\n"
-        "  /scan_channel [N] - Последние N постов из каналов (по умолч. 10)\n\n"
-        "⚙️ <b>Settings:</b>\n"
-        "  /style - Show prompt configuration\n"
-        "  /help - This help message"
+        "🤖 <b>Telegram AI Userbot Agent — Command Reference</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📊 <b>УПРАВЛЕНИЕ АГЕНТОМ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/start</b>\n"
+        "  Запуск бота. Показывает приветственное сообщение.\n\n"
+        "<b>/status</b>\n"
+        "  Показать полное состояние агента:\n"
+        "  • Включён/выключен агент\n"
+        "  • Режим по умолчанию\n"
+        "  • Количество чатов по режимам (OFF/WATCH/DRAFT/AUTO)\n"
+        "  • Ожидающие действия (drafts на аппрув)\n"
+        "  • Провайдер LLM\n"
+        "  • Последняя активность и последний ответ агента\n\n"
+        "<b>/pause</b>\n"
+        "  ⏸️ Приостановить агента. Новые сообщения не обрабатываются.\n"
+        "  Агент сохраняет настройки, но игнорирует входящие.\n\n"
+        "<b>/resume</b>\n"
+        "  ▶️ Возобновить работу агента после паузы.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💬 <b>УПРАВЛЕНИЕ ЧАТАМИ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/chats</b>\n"
+        "  Список всех настроенных чатов (до 20):\n"
+        "  • Название или ID\n"
+        "  • Режим (OFF/WATCH/DRAFT/AUTO)\n"
+        "  • Статус доверия (🔒trusted / 🔓untrusted)\n\n"
+        "<b>/mode &lt;chat_id&gt; &lt;MODE&gt;</b>\n"
+        "  Установить режим для чата.\n"
+        "  Режимы:\n"
+        "  • OFF — игнорировать чат\n"
+        "  • WATCH — только уведомления, без ответов\n"
+        "  • DRAFT — генерировать ответ на аппрув\n"
+        "  • AUTO — автоответ (только для trusted)\n"
+        "  Примеры:\n"
+        "    /mode 123456789 DRAFT\n"
+        "    /mode Ivan AUTO\n\n"
+        "<b>/trust &lt;chat_id&gt;</b>\n"
+        "  Пометить чат как доверенный.\n"
+        "  Только trusted чаты могут получать AUTO-ответы.\n"
+        "  Пример: /trust 123456789\n\n"
+        "<b>/untrust &lt;chat_id&gt;</b>\n"
+        "  Убрать статус доверенного чата.\n"
+        "  Пример: /untrust 123456789\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "✏️ <b>ОТПРАВКА СООБЩЕНИЙ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/send &lt;chat_id&gt; &lt;текст&gt;</b>\n"
+        "  Отправить сообщение вручную через HITL-аппрув.\n"
+        "  Бот пришлёт черновик с кнопками [Approve]/[Reject].\n"
+        "  Пример:\n"
+        "    /send 123456789 Привет, готов обсудить вакансию\n\n"
+        "<b>/recent</b>\n"
+        "  Последние 10 действий агента:\n"
+        "  • ID действия\n"
+        "  • Тип (reply/send_message)\n"
+        "  • Статус (pending/approved/rejected/executed/expired)\n"
+        "  • Chat ID\n\n"
+        "<b>/catchup</b>\n"
+        "  Ручная обработка пропущенных сообщений.\n"
+        "  Сканирует последние диалоги и обрабатывает новые\n"
+        "  сообщения, которые пришли пока агент был офлайн.\n"
+        "  Идеально после рестарта или долгого простоя.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📢 <b>КАНАЛЫ (МОНИТОРИНГ ВАКАНСИЙ)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/channels</b>\n"
+        "  Список всех отслеживаемых каналов:\n"
+        "  • ID канала\n"
+        "  • Название\n"
+        "  • Outreach (вкл/выкл)\n"
+        "  • Keywords (фильтр по ключевым словам)\n\n"
+        "<b>/add_channel &lt;ссылка|username&gt; [outreach]</b>\n"
+        "  Добавить канал для мониторинга.\n"
+        "  outreach — опционально, включает авто-рассылку контактов.\n"
+        "  Примеры:\n"
+        "    /add_channel @it_jobs\n"
+        "    /add_channel @it_jobs outreach\n"
+        "    /add_channel https://t.me/+ucoAOCsXCwk3ZmFi\n\n"
+        "<b>/remove_channel &lt;ссылка|username|ID&gt;</b>\n"
+        "  Удалить канал из мониторинга.\n"
+        "  Можно указать ссылку, username или числовой ID.\n"
+        "  Примеры:\n"
+        "    /remove_channel @it_jobs\n"
+        "    /remove_channel https://t.me/+ucoAOCsXCwk3ZmFi\n"
+        "    /remove_channel -1001782596777\n\n"
+        "<b>/scan_channel [N] [ON|OFF]</b>\n"
+        "  Сканировать последние N постов из всех каналов.\n"
+        "  Параметры:\n"
+        "  • N — количество постов (1-50, по умолч. 10)\n"
+        "  • ON — обработать аутрич только для каналов, где он включён\n"
+        "  • OFF — только переслать посты, без аутрича\n"
+        "  Примеры:\n"
+        "    /scan_channel         # 10 постов, режим каналов\n"
+        "    /scan_channel 20      # 20 постов, режим каналов\n"
+        "    /scan_channel ON      # 10 постов + аутрич\n"
+        "    /scan_channel OFF     # 10 постов, без аутрича\n"
+        "    /scan_channel 30 ON   # 30 постов + аутрич\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚙️ <b>НАСТРОЙКИ И ПЕРСОНА</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>/style</b>\n"
+        "  Показать путь к файлам системных промптов:\n"
+        "  • system.ru.txt — основной промпт\n"
+        "  • safety.ru.txt — правила безопасности\n\n"
+        "<b>/persona [текст]</b>\n"
+        "  Просмотр или установка персоны агента.\n"
+        "  Без аргумента — показывает текущую персону.\n"
+        "  С текстом — обновляет и применяет сразу.\n"
+        "  Пример:\n"
+        "    /persona Ты — frontend-разработчик с 5 годами опыта\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "ℹ️ <b>ПРИМЕРЫ ИСПОЛЬЗОВАНИЯ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "1️⃣ <b>Безопасный старт:</b>\n"
+        "   /status → убедиться AGENT_GLOBAL_ENABLED=false\n"
+        "   /mode 123456789 DRAFT → первый чат в режиме черновиков\n"
+        "   /trust 123456789 → если чат доверенный\n\n"
+        "2️⃣ <b>Мониторинг вакансий:</b>\n"
+        "   /add_channel @it_jobs outreach\n"
+        "   /scan_channel 20 ON → сканировать и писать контактам\n\n"
+        "3️⃣ <b>Ручная отправка:</b>\n"
+        "   /send 123456789 Готов обсудить детали → аппрув в боте\n\n"
+        "4️⃣ <b>После рестарта:</b>\n"
+        "   /catchup → обработать пропущенные сообщения\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📚 <b>РЕЖИМЫ ЧАТОВ (подробно)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>OFF</b> — Агент полностью игнорирует чат.\n"
+        "<b>WATCH</b> — Агент уведомляет владельца о сообщениях, но не отвечает.\n"
+        "<b>DRAFT</b> — Агент генерирует ответ и ждёт аппрува.\n"
+        "<b>AUTO</b> — Агент отвечает автоматически (только trusted чаты).\n\n"
+        "⚠️ <b>Безопасность:</b>\n"
+        "• Агент стартует выключенным (AGENT_GLOBAL_ENABLED=false)\n"
+        "• Режим по умолчанию — DRAFT (требуется аппрув)\n"
+        "• AUTO работает только для trusted чатов\n"
+        "• Деньги/встречи/обязательства всегда требуют аппрува\n"
     )
     await message.answer(text, parse_mode="HTML")
+
+
+async def cmd_channels(message: types.Message, settings: Settings, db: Database) -> None:
+    """Handle /channels command - list monitored channels."""
+    with db.get_sync_session() as session:
+        repo = MonitoredChannelRepo(session)
+        channels = repo.get_all()
+    
+    if not channels:
+        await message.answer(
+            "📢 <b>Нет отслеживаемых каналов</b>\n\n"
+            "Добавьте канал командой:\n"
+            "  /add_channel &lt;ссылка_или_юзернейм&gt; [outreach]\n\n"
+            "Примеры:\n"
+            "  /add_channel @it_jobs\n"
+            "  /add_channel https://t.me/+ucoAOCsXCwk3ZmFi outreach",
+            parse_mode="HTML"
+        )
+        return
+    
+    text = "📢 <b>Отслеживаемые каналы:</b>\n\n"
+    for i, ch in enumerate(channels, 1):
+        outreach_icon = "📤" if ch.auto_outreach else "👁️"
+        enabled_icon = "✅" if ch.enabled else "❌"
+        text += f"{i}. <code>{ch.channel_id}</code> — {ch.channel_title or 'Без названия'}\n"
+        text += f"   {enabled_icon} {outreach_icon} Outreach: {'✅' if ch.auto_outreach else '❌'}\n"
+        if ch.keywords:
+            text += f"   🔑 Keywords: {ch.keywords}\n"
+        text += "\n"
+    
+    text += f"\nВсего: {len(channels)} канал(ов)"
+    await message.answer(text, parse_mode="HTML")
+
+
+async def cmd_add_channel(
+    message: types.Message,
+    settings: Settings,
+    userbot_client: TelegramClient,
+    db: Database,
+    args: str
+) -> None:
+    """Handle /add_channel command - add channel by link or username."""
+    if not args:
+        await message.answer(
+            "❌ <b>Укажите ссылку или юзернейм канала</b>\n\n"
+            "Примеры:\n"
+            "  /add_channel @it_jobs\n"
+            "  /add_channel https://t.me/+ucoAOCsXCwk3ZmFi\n"
+            "  /add_channel @design_jobs outreach",
+            parse_mode="HTML"
+        )
+        return
+    
+    parts = args.split(maxsplit=1)
+    channel_input = parts[0]
+    enable_outreach = len(parts) > 1 and parts[1].lower() == "outreach"
+    
+    status_msg = await message.answer("⏳ Ищу канал...", parse_mode="HTML")
+    
+    try:
+        # Get channel info via Telethon
+        entity = await userbot_client.get_entity(channel_input)
+        
+        # Extract channel ID
+        channel_id = entity.id
+        if hasattr(channel_id, 'channel_id'):
+            channel_id = channel_id.channel_id
+        
+        # Convert to superchannel format if needed
+        if isinstance(channel_id, int) and channel_id > 0:
+            channel_id = int(f"-100{channel_id}")
+        
+        channel_title = getattr(entity, 'title', 'Unknown')
+        username = getattr(entity, 'username', None)
+        
+        # Save to database
+        with db.get_sync_session() as session:
+            repo = MonitoredChannelRepo(session)
+            repo.add(
+                channel_id=channel_id,
+                channel_title=channel_title,
+                auto_outreach=enable_outreach,
+            )
+        
+        await status_msg.edit_text(
+            f"✅ <b>Канал добавлен!</b>\n\n"
+            f"📢 <b>Название:</b> {channel_title}\n"
+            f"🆔 <b>ID:</b> <code>{channel_id}</code>\n"
+            f"📤 <b>Outreach:</b> {'✅ Включён' if enable_outreach else '❌ Выключен'}\n\n"
+            f"⚡ <b>Изменения применены немедленно!</b>",
+            parse_mode="HTML"
+        )
+        
+    except ValueError as e:
+        await status_msg.edit_text(
+            f"❌ <b>Канал не найден</b>\n\n"
+            f"Убедитесь, что вы подписаны на этот канал.\n"
+            f"Ошибка: {e}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await status_msg.edit_text(
+            f"❌ <b>Ошибка:</b> {e}",
+            parse_mode="HTML"
+        )
+
+
+async def cmd_remove_channel(
+    message: types.Message,
+    settings: Settings,
+    db: Database,
+    args: str,
+    userbot_client: TelegramClient | None = None,
+) -> None:
+    """Handle /remove_channel command - remove channel by ID, link, or username."""
+    if not args:
+        await message.answer(
+            "❌ <b>Укажите ссылку, username или ID канала</b>\n\n"
+            "Примеры:\n"
+            "  /remove_channel @it_jobs\n"
+            "  /remove_channel https://t.me/+ucoAOCsXCwk3ZmFi\n"
+            "  /remove_channel -1001782596777\n\n"
+            "Используйте /channels чтобы увидеть список.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Try to parse as integer ID first
+    channel_id = None
+    if args.lstrip("-").isdigit():
+        channel_id = int(args)
+    else:
+        # Resolve via Telethon (link or username)
+        if userbot_client is None:
+            await message.answer(
+                "❌ Userbot клиент недоступен. Укажите числовой ID канала.",
+                parse_mode="HTML"
+            )
+            return
+
+        status_msg = await message.answer("⏳ Ищу канал...", parse_mode="HTML")
+        try:
+            entity = await userbot_client.get_entity(args)
+            channel_id = entity.id
+            if hasattr(channel_id, 'channel_id'):
+                channel_id = channel_id.channel_id
+            # Convert to superchannel format if needed
+            if isinstance(channel_id, int) and channel_id > 0:
+                channel_id = int(f"-100{channel_id}")
+            await status_msg.edit_text(
+                f"✅ Найдено: <code>{channel_id}</code>\nУдаляю...",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await status_msg.edit_text(
+                f"❌ Канал не найден: {e}",
+                parse_mode="HTML"
+            )
+            return
+
+    # Remove from database
+    with db.get_sync_session() as session:
+        repo = MonitoredChannelRepo(session)
+        removed = repo.remove(channel_id)
+
+    if removed:
+        await message.answer(
+            f"✅ <b>Канал удалён!</b>\n\n"
+            f"🆔 <b>ID:</b> <code>{channel_id}</code>\n\n"
+            f"⚡ <b>Изменения применены немедленно!</b>",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            f"❌ Канал <code>{channel_id}</code> не найден в базе",
+            parse_mode="HTML"
+        )
