@@ -8,7 +8,10 @@ from enum import Enum
 
 try:
     from sqlmodel import Field, SQLModel
-    model_dataclass = lambda cls: cls
+
+    def model_dataclass(cls):
+        return cls
+
 except ImportError:  # pragma: no cover
     def Field(default=None, **kwargs):
         if "default_factory" in kwargs:
