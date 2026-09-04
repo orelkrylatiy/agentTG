@@ -10,10 +10,14 @@ __all__ = [
     "MessageDirection",
     "PendingAction",
     "ActionStatus",
+    "OutreachContact",
+    "OutreachStatus",
     "ChatSettingsRepo",
     "MessageLogRepo",
     "PendingActionRepo",
     "GlobalStateRepo",
+    "MonitoredChannelRepo",
+    "OutreachContactRepo",
 ]
 
 
@@ -29,6 +33,8 @@ def __getattr__(name: str):
         "GlobalState",
         "MessageDirection",
         "MessageLog",
+        "OutreachContact",
+        "OutreachStatus",
         "PendingAction",
     }:
         from tg_agent.storage import models
@@ -38,6 +44,8 @@ def __getattr__(name: str):
         "ChatSettingsRepo",
         "GlobalStateRepo",
         "MessageLogRepo",
+        "MonitoredChannelRepo",
+        "OutreachContactRepo",
         "PendingActionRepo",
     }:
         from tg_agent.storage import repositories
