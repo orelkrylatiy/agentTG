@@ -54,4 +54,7 @@ def test_chatgpt_token_dir_rejects_absolute_outside_project(tmp_path: Path):
     outside = tmp_path / "oauth"
     outside.mkdir()
     with pytest.raises(ValueError):
-        build_settings(CHATGPT_TOKEN_DIR=str(outside)).chatgpt_token_dir_path
+        token_dir_path = build_settings(
+            CHATGPT_TOKEN_DIR=str(outside)
+        ).chatgpt_token_dir_path
+        assert token_dir_path is not None
