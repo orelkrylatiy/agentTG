@@ -40,7 +40,7 @@ async def test_scan_channel_uses_database_channels(tmp_path, monkeypatch):
     client = MagicMock()
     client.get_messages = AsyncMock(
         side_effect=lambda channel_id, limit: [
-            SimpleNamespace(text=f"post from {channel_id}")
+            SimpleNamespace(id=1, text=f"post from {channel_id}")
         ]
     )
     client.get_entity = AsyncMock(
@@ -77,8 +77,18 @@ async def test_scan_channel_respects_channel_policy(tmp_path):
 
     with db.get_sync_session() as session:
         repo = MonitoredChannelRepo(session)
-        repo.add(channel_id=-1001, channel_title="Monitor", auto_outreach=False, keywords=["python"])
-        repo.add(channel_id=-1002, channel_title="Outreach", auto_outreach=True, keywords=["python"])
+        repo.add(
+            channel_id=-1001,
+            channel_title="Monitor",
+            auto_outreach=False,
+            keywords=["python"],
+        )
+        repo.add(
+            channel_id=-1002,
+            channel_title="Outreach",
+            auto_outreach=True,
+            keywords=["python"],
+        )
 
     message = MagicMock()
     message.answer = AsyncMock()
@@ -87,11 +97,13 @@ async def test_scan_channel_respects_channel_policy(tmp_path):
     client = MagicMock()
     client.get_messages = AsyncMock(
         side_effect=lambda channel_id, limit: [
-            SimpleNamespace(text="unrelated post"),
-            SimpleNamespace(text="python post"),
+            SimpleNamespace(id=1, text="unrelated post"),
+            SimpleNamespace(id=2, text="python post"),
         ]
     )
-    client.get_entity = AsyncMock(side_effect=lambda channel_id: SimpleNamespace(title=str(channel_id)))
+    client.get_entity = AsyncMock(
+        side_effect=lambda channel_id: SimpleNamespace(title=str(channel_id))
+    )
 
     channel_handler = MagicMock()
     channel_handler.llm_client = object()
@@ -99,7 +111,15 @@ async def test_scan_channel_respects_channel_policy(tmp_path):
     channel_handler._try_outreach = AsyncMock()
 
     settings = SimpleNamespace(owner_telegram_id=123456)
-    await cmd_scan_channel(message, settings, db, control_bot, client, "ON", channel_handler)
+    await cmd_scan_channel(
+        message,
+        settings,
+        db,
+        control_bot,
+        client,
+        "ON",
+        channel_handler,
+    )
 
     assert control_bot.send_message.await_count == 2
     channel_handler._try_outreach.assert_awaited_once()
