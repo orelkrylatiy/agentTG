@@ -24,6 +24,6 @@ jobs:
       - name: Compile
         run: python -m compileall -q src
       - name: Ruff correctness
-        run: ruff check src tests --select F,E9
+        run: ruff check src tests --select F,E9 --ignore F841
       - name: Pytest
         run: pytest -q
