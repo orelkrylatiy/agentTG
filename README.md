@@ -1,578 +1,398 @@
-# Telegram AI Userbot Agent
+# agentTG
 
-Personal Telegram AI userbot agent with control bot and Human-in-the-Loop (HITL) approval.
+Telegram execution layer for personal AI agents.
 
-## ⚠️ Important Warnings
+agentTG keeps one authorized Telethon user session running and exposes controlled Telegram operations through four surfaces:
 
-**Before using this project:**
+- Telegram event automation for incoming messages and monitored channels
+- aiogram control bot with HITL approval and runtime controls
+- MCP tools for Claude Code and other MCP clients
+- reusable named skills/workflows for repeated research, replies and outreach
 
-1. **Use a test Telegram account** — Do NOT use your primary Telegram account. Register a separate account on a spare phone number (e.g. a secondary SIM or a virtual number) and test against that.
-2. **Telegram ToS** — Userbot automation may violate Telegram Terms of Service. Use at your own risk.
-3. **Start in safe mode** — Agent starts with `AGENT_GLOBAL_ENABLED=false` and `DEFAULT_CHAT_MODE=DRAFT`. Never enable AUTO mode for untrusted chats.
-4. **Privacy** — All messages are processed locally. LLM providers receive message content for reply generation.
-
-## What This Is
-
-A personal AI assistant that:
-- Connects to your Telegram account via userbot (Telethon)
-- Reads incoming messages in configured chats
-- Generates replies using LLM (ChatGPT via LiteLLM OAuth, or fallback providers)
-- Sends drafts to a control bot for approval (HITL)
-- Can auto-reply in trusted chats (with safety checks)
+The LLM decides what text to generate. Deterministic Python policy, persisted state and explicit workflow rules decide what is processed and what can be sent.
 
 ## Architecture
 
-```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Telegram API   │────▶│  Telethon        │────▶│  Incoming       │
-│  (User Account) │     │  Userbot         │     │  Message Handler│
-└─────────────────┘     └──────────────────┘     └────────┬────────┘
-                                                          │
-┌─────────────────┐     ┌──────────────────┐     ┌────────▼────────┐
-│  Control Bot    │◀────│  Policy Gate     │◀────│  Chat Settings  │
-│  (aiogram)      │     │  (Modes/Filters) │     │  (SQLite)       │
-└────────┬────────┘     └──────────────────┘     └─────────────────┘
-         │                       │
-         │  Approve/Reject       │
-         │                       ▼
-         │              ┌──────────────────┐
-         │              │  LLM Client      │
-         │              │  (LiteLLM)       │
-         │              └────────┬─────────┘
-         │                       │
-         ▼                       ▼
-┌─────────────────────────────────────────────────┐
-│              Reply Generation                   │
-│  (System Prompt + Context + Incoming Message)   │
-└─────────────────────────────────────────────────┘
+```text
+                         ┌───────────────┐
+                         │ Claude / MCP  │
+                         └───────┬───────┘
+                                 │ HTTP /mcp
+┌──────────────┐          ┌──────▼─────────────────────────────┐
+│ Control Bot  │─────────▶│             agentTG               │
+└──────────────┘          │                                    │
+                          │ TelegramService / SkillRunner       │
+Telegram events ─────────▶│ Policy / HITL / LLM / Audit        │
+Channel events ──────────▶│                                    │
+                          └──────────┬──────────────┬───────────┘
+                                     │              │
+                                     ▼              ▼
+                                  Telethon        SQLite
+                                     │
+                                     ▼
+                                  Telegram
 ```
 
-### Components
+One process owns the Telethon session. MCP is embedded into that same asyncio daemon, so Claude does not start a second Telegram client or contend for the session file.
 
-| Component | Technology | Purpose |
-|-----------|------------|---------|
-| Userbot | Telethon | Connect to Telegram account, read/send messages |
-| Control Bot | aiogram 3.x | Owner commands, draft approval, status |
-| Database | SQLite + SQLModel | Chat settings, message logs, pending actions |
-| LLM Client | LiteLLM | Unified interface for multiple LLM providers |
-| Policy Engine | Custom | Mode decisions, safety filters, cooldowns |
+## Main capabilities
 
-### Why Not MCP in MVP?
+- Read recent and unread Telegram dialogs
+- Inspect conversation history and peer metadata
+- Search Telegram messages globally or inside a chat
+- Research channels and filter recent posts
+- Generate contextual replies with the configured persona/prompts
+- Send an explicitly requested message with audit logging
+- Monitor configured channels and extract `@username` / `t.me/...` contacts
+- Durable outreach deduplication and rate limiting in SQLite
+- DRAFT/AUTO/WATCH/OFF chat modes
+- Human-in-the-Loop approval through the control bot
+- Runtime `/pause` / `/resume`
+- Local MCP endpoint for Claude Code
+- Named workflows for inbox research, contact context, search, channel research, replies and outreach
 
-MCP (Model Context Protocol) is useful for connecting external tools to AI agents. However, for this MVP:
-
-- **Simplicity** — Direct Telethon connection is simpler than MCP server setup
-- **Fewer moving parts** — No need for separate MCP server process
-- **Faster iteration** — Easier to test and debug locally
-- **Lower latency** — Direct API calls vs. MCP protocol overhead
-
-MCP can be added later (Phase 2) when you want to expose Telegram as a tool to external agents.
-
-## Installation
-
-### Prerequisites
+## Requirements
 
 - Python 3.11 or 3.12
-- Telegram API credentials (from my.telegram.org)
-- Telegram bot token (from @BotFather)
+- Telegram API credentials from `my.telegram.org`
+- Telegram bot token from BotFather for the control bot
+- An LLM provider supported by the project configuration
 
-### Step 1: Get Telegram Credentials
+Userbot automation is subject to Telegram's rules and rate limits. Test changes carefully before enabling automatic sends broadly.
 
-1. Go to [my.telegram.org](https://my.telegram.org)
-2. Log in with your phone number
-3. Click "API development tools"
-4. Create a new application
-5. Copy `api_id` and `api_hash`
-
-### Step 2: Create Control Bot
-
-1. Open Telegram and find @BotFather
-2. Send `/newbot`
-3. Follow prompts to create bot
-4. Copy the bot token
-
-### Step 3: Find Your Telegram ID
-
-Use @userinfobot or @getmyid_bot to find your numeric Telegram ID.
-
-### Step 4: Clone and Setup
+## Install
 
 ```bash
-# Clone repository
-git clone <repository-url>
-cd telegram-ai-userbot-agent
+git clone https://github.com/orelkrylatiy/agentTG.git
+cd agentTG
 
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# or: venv\Scripts\activate  # Windows
-
-# Install dependencies
+source venv/bin/activate
 pip install -e ".[dev]"
 
-# Copy environment file
 cp .env.example .env
 ```
 
-### Step 5: Configure .env
-
-Edit `.env` with your credentials:
+Fill the required Telegram/control-bot values in `.env`:
 
 ```env
-# Required
 TG_API_ID=123456
-TG_API_HASH=your_api_hash_here
-TG_PHONE=+1234567890
-CONTROL_BOT_TOKEN=bot:token_here
+TG_API_HASH=replace_me
+TG_PHONE=+10000000000
+CONTROL_BOT_TOKEN=replace_me
 OWNER_TELEGRAM_ID=123456789
+```
 
-# Recommended
+Safe defaults are already represented in `.env.example`:
+
+```env
 AGENT_GLOBAL_ENABLED=false
 DEFAULT_CHAT_MODE=DRAFT
 ```
 
-### Step 6: First Run
+Start the complete daemon:
 
 ```bash
 python -m tg_agent.main
 ```
 
-On first run, Telethon will prompt for the login code sent to your Telegram. Enter it in the terminal.
+On the first Telethon login you may be prompted for the Telegram login code in the terminal.
 
-### Step 6.5: Verify Subscription OAuth Before Telegram Testing
+## MCP / Claude Code
 
-If you want the agent to use your ChatGPT subscription through LiteLLM, validate that path first:
+MCP is enabled by default on loopback only:
+
+```env
+MCP_ENABLED=true
+MCP_HOST=127.0.0.1
+MCP_PORT=8765
+MCP_ALLOW_WRITES=true
+```
+
+Endpoint:
+
+```text
+http://127.0.0.1:8765/mcp
+```
+
+The repository includes a project `.mcp.json`, so Claude Code opened from the repo root can discover `agenttg` after you approve the project MCP configuration.
+
+Equivalent manual registration:
 
 ```bash
-python -m tg_agent.smoke_llm
+claude mcp add --transport http agenttg http://127.0.0.1:8765/mcp
 ```
 
-Do this before debugging Telegram message handling. The correct order is:
-1. make `chatgpt_oauth` work
-2. confirm tokens are persisted under `data/litellm/chatgpt/`
-3. only then start `python -m tg_agent.main`
+For the complete MCP/tool/skill reference and natural-language examples, see [`docs/MCP.md`](docs/MCP.md).
 
-## LLM Configuration
+### MCP read/research tools
 
-### ChatGPT OAuth (Primary)
+| Tool | Purpose |
+| --- | --- |
+| `tg_status` | Agent/Telegram connection state |
+| `tg_list_dialogs` | Recent dialogs, optionally unread only |
+| `tg_unread_chats` | Unread chats plus recent context |
+| `tg_get_messages` | Read chat/person/channel history |
+| `tg_search_messages` | Global or chat-scoped Telegram search |
+| `tg_chat_info` | Resolve username/link/ID |
+| `tg_generate_reply` | Generate a draft without sending |
+| `tg_scan_channel` | Read/filter recent channel posts |
+| `tg_list_configured_channels` | Inspect monitored-channel policy |
+| `tg_list_skills` | Discover named workflows |
 
-This project uses LiteLLM's ChatGPT OAuth provider to leverage your ChatGPT Plus subscription.
+### MCP action tools
 
-**Recommended setup flow:**
+| Tool | Purpose |
+| --- | --- |
+| `tg_send_message` | Send one explicitly requested message and audit it |
+| `tg_mark_read` | Mark a chat read |
+| `tg_run_skill` | Run a named workflow |
+| `tg_pause_automation` | Pause automatic message/channel processing |
+| `tg_resume_automation` | Resume automatic processing |
 
-1. Configure `.env`:
-   ```env
-   LLM_PROVIDER=chatgpt_oauth
-   LLM_MODEL=chatgpt/gpt-5
-   LITELLM_CHATGPT_ENABLED=true
-   CHATGPT_TOKEN_DIR=data/litellm/chatgpt
-   CHATGPT_AUTH_FILE=auth.json
-   CHATGPT_API_BASE=https://chatgpt.com/backend-api/codex
-   CHATGPT_ORIGINATOR=codex_cli_rs
-   ```
+Set `MCP_ALLOW_WRITES=false` to disable direct MCP sends/mark-read and mutating workflow actions while keeping research available.
 
-2. Run the smoke test:
-   ```bash
-   python -m tg_agent.smoke_llm
-   ```
+## Named workflows
 
-3. If LiteLLM starts device-code auth, complete that login in the browser with the subscription account you want the Telegram agent to use.
+Internal workflows are invoked through `tg_run_skill`:
 
-4. Confirm token files appear in `data/litellm/chatgpt/`. These files must survive restarts and Docker container recreation.
+| Skill | Purpose |
+| --- | --- |
+| `unread_inbox` | Unread chats with context |
+| `contact_context` | Metadata + history for one contact/chat |
+| `telegram_search` | Search messages |
+| `channel_research` | Read channel posts and extract contacts |
+| `reply_to_chat` | Generate a contextual reply; optional explicit send |
+| `channel_outreach` | Research/extract contacts; send only with `send=true` |
+| `vacancy_hunt` | Research all configured channels; send only with `send=true` |
+| `recent_activity` | Recent audited agent activity |
 
-5. Only after the smoke test succeeds, run the full Telegram agent:
-   ```bash
-   python -m tg_agent.main
-   ```
+Bulk workflows default to dry-run. `channel_outreach` and `vacancy_hunt` reuse the same SQLite outreach deduplication/rate-limit path as live channel automation.
 
-**Optional:**
+Claude Code project skills are included under `.claude/skills/`:
 
-Install LiteLLM proxy extras if you need them:
-   ```bash
-   pip install 'litellm[proxy]'
-   ```
+- `/tg-inbox`
+- `/tg-research`
+- `/tg-reply`
+- `/tg-outreach`
+- `/tg-vacancy-hunt`
 
-If ChatGPT OAuth fails on your machine or VPS, switch providers through `.env` and use the fallback path.
+The bulk/send-oriented Claude skills are marked manual-only so they are not automatically selected as incidental side effects of a research request.
 
-**Security constraints on OAuth settings:**
+## Example Claude requests
 
-For safety, the config layer validates the ChatGPT OAuth variables and will refuse to start otherwise:
+```text
+Посмотри непрочитанные чаты в Telegram и скажи, кому надо ответить.
+```
 
-- `CHATGPT_API_BASE` must use `https` and point at an allowed host (`chatgpt.com` or `chat.openai.com`) with a path under `/backend-api/`.
-- `CHATGPT_TOKEN_DIR` must resolve inside the project root (no `..` traversal, no absolute path outside the repo).
-- `CHATGPT_AUTH_FILE` must be a single relative file name (no nested or absolute paths).
+```text
+Посмотри последние сообщения с @username и объясни, что там нового.
+```
 
-The token directory is created automatically on startup; in Docker it is also persisted via the `./data/litellm` volume.
+```text
+Найди в Telegram, где мы обсуждали React Server Components.
+```
 
-### OpenAI Fallback
+```text
+Посмотри последние 30 постов в @jobs и выдели релевантные вакансии. Ничего не отправляй.
+```
 
-If you have an OpenAI API key:
+```text
+Напиши @username: "Да, завтра после шести удобно".
+```
+
+```text
+Посмотри @jobs, найди контакты из подходящих постов и напиши максимум трём новым людям.
+```
+
+## Chat modes
+
+| Mode | Behavior |
+| --- | --- |
+| `OFF` | Ignore automatic processing for the chat |
+| `WATCH` | Notify/observe without replying |
+| `DRAFT` | Generate a draft and require owner approval |
+| `AUTO` | Automatic reply for trusted chats when policy permits |
+
+`agent_enabled` is persisted in SQLite and is the runtime source of truth for `/pause` and `/resume`.
+
+## Control bot
+
+Core commands:
+
+| Command | Description |
+| --- | --- |
+| `/status` | Runtime state and statistics |
+| `/pause` | Pause automatic processing |
+| `/resume` | Resume automatic processing |
+| `/chats` | Configured chats |
+| `/mode <chat> <mode>` | OFF/WATCH/DRAFT/AUTO |
+| `/trust <chat>` | Mark trusted |
+| `/untrust <chat>` | Remove trust |
+| `/send <chat> <text>` | Create a HITL-approved manual send |
+| `/recent` | Recent pending/action history |
+| `/catchup` | Manually process missed dialogs |
+| `/channels` | List monitored channels |
+| `/add_channel <target> [outreach]` | Add channel |
+| `/remove_channel <target>` | Remove channel |
+| `/scan_channel [N] [ON\|OFF]` | Manual channel scan |
+| `/persona [text]` | View/update persona |
+| `/help` | Full command reference |
+
+## Channel monitoring and outreach
+
+SQLite is the runtime source of truth for monitored channels. `MONITORED_CHANNELS` remains a legacy/bootstrap import format.
+
+Example bootstrap value:
 
 ```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
+MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach:python,frontend"
+```
+
+Format:
+
+```text
+channel_id[:Title][:outreach][:keyword1,keyword2]
+```
+
+Live channel flow:
+
+```text
+new channel post
+  -> SQLite channel config
+  -> enabled/keyword checks
+  -> notify owner
+  -> if auto_outreach is configured
+       -> extract contacts
+       -> SQLite dedup claim
+       -> per-channel hourly limit
+       -> LLM outreach draft
+       -> Telegram send
+       -> audit + sent state
+```
+
+Manual MCP research does not imply sending. Bulk workflow sending requires `send=true`, and configured vacancy hunting only auto-sends for channels where `auto_outreach=true` is already persisted.
+
+## LLM configuration
+
+Primary options:
+
+```env
+LLM_PROVIDER=chatgpt_oauth
+LLM_MODEL=chatgpt/gpt-5
+```
+
+Optional fallbacks:
+
+```env
+OPENAI_API_KEY=
 OPENAI_FALLBACK_MODEL=gpt-4o-mini
-```
 
-### OpenRouter Fallback
-
-OpenRouter provides access to multiple models:
-
-```env
-LLM_PROVIDER=openrouter
-OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_API_KEY=
 OPENROUTER_FALLBACK_MODEL=openrouter/openai/gpt-4o-mini
 ```
 
-### Provider Fallback Chain
-
-The agent tries providers in this order:
-1. Primary provider (from `LLM_PROVIDER`)
-2. OpenAI (if key configured)
-3. OpenRouter (if key configured)
-
-If all providers fail, the agent creates a draft with an error message for owner review.
-
-## Control Bot Commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Start interaction with bot |
-| `/status` | Show agent status and statistics |
-| `/pause` | Pause agent (stop processing messages) |
-| `/resume` | Resume agent |
-| `/chats` | List all configured chats |
-| `/mode <chat> <mode>` | Set chat mode (OFF/WATCH/DRAFT/AUTO) |
-| `/trust <chat>` | Mark chat as trusted (allows AUTO) |
-| `/untrust <chat>` | Remove trusted status |
-| `/send <chat> <msg>` | Send message (requires approval) |
-| `/recent` | Show recent agent actions |
-| `/catchup` | Manually process messages missed while agent was offline |
-| `/style` | Show prompt configuration |
-| `/help` | Show help message |
-| `/scan_channel [N] [ON\|OFF]` | Scan last N posts from SQLite channels (default: 10); `ON` processes only channels explicitly configured for outreach |
-
-`/catchup` is the manual replacement for the old startup replay flow. It only runs when you invoke it from the control bot.
-
-## Channel Monitoring
-
-The agent can monitor Telegram channels for new posts, extract contact information, and automatically send personalized outreach messages.
-
-### Configuration
-
-Channels are stored in SQLite and managed by the control bot commands:
-
-- `/add_channel` to add a channel
-- `/remove_channel` to remove a channel
-- `/channels` to inspect the current DB-backed list
-
-`MONITORED_CHANNELS` is kept as a legacy bootstrap format for first-run migration and for the standalone `outreach.py` script. SQLite is the runtime source of truth after the first startup migration; `/add_channel` and `/remove_channel` take effect immediately and survive restarts.
-
-```bash
-MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach:python,frontend,-1001234567890:Design:outreach:figma,ui"
-```
-
-**Format:** `channel_id[:Title][:outreach][:keyword1,keyword2]`
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `channel_id` | ✅ | Telegram channel ID (e.g., `-1001782596777`) |
-| `Title` | ❌ | Human-readable name for logging |
-| `outreach` | ❌ | Enable automatic DM to contacts |
-| `keywords` | ❌ | Filter posts by keywords (comma-separated). A later channel must start with its numeric ID. |
-
-If you edit the bot-managed list through `/add_channel`, the database becomes the source of truth for `/channels` and `/scan_channel`.
-
-### Examples
-
-**Monitor only (no auto-outreach):**
-```bash
-MONITORED_CHANNELS="-1001782596777:IT Jobs"
-```
-
-**Auto-outreach to all contacts:**
-```bash
-MONITORED_CHANNELS="-1001782596777:IT Jobs:outreach"
-```
-
-**Auto-outreach with keyword filter:**
-```bash
-MONITORED_CHANNELS="-1001782596777:IT:outreach:python,frontend"
-```
-
-**Multiple channels with keyword filters:**
-```bash
-MONITORED_CHANNELS="-1001782596777:IT:outreach:python,frontend,-1001234567890:Design:outreach:figma,ui"
-```
-
-### How It Works
-
-1. **Monitor**: Agent listens for new posts in configured channels
-2. **Extract**: Parses `@username` and `t.me/username` from post text
-3. **Generate**: Creates personalized message using LLM
-4. **Send**: Sends DM via your userbot account
-5. **Track**: Saves contacted usernames to `data/contacted.json` (no duplicates)
-
-Channel posts are subscribed through one live Telethon handler and checked against SQLite on each event. This means channels added or removed through the control bot do not require a process restart. Manual scans apply each channel's enabled state, keyword filter, and `auto_outreach` flag. `ON` enables outreach for channels already configured with `auto_outreach`; it never enables outreach for monitor-only channels.
-
-### Custom Prompts
-
-Prompt files are optional and are resolved dynamically, so edits take effect without restarting the agent:
-
-```text
-prompts/system.ru.txt                 # global reply instructions
-prompts/persona.ru.txt                # optional persona layer
-prompts/safety.ru.txt                 # safety layer
-prompts/outreach/default.txt          # default outreach prompt
-prompts/outreach/<channel_id>.txt     # channel-specific outreach prompt
-prompts/reply/default.txt             # default incoming-reply prompt
-prompts/reply/<chat_id>.txt            # chat-specific incoming-reply prompt
-```
-
-Specific channel/chat files take precedence over their `default.txt` file. See [prompts/PROMPTS_SPEC.md](prompts/PROMPTS_SPEC.md) for examples and the exact fallback order.
-
-### Manual Outreach
-
-Run one-time outreach scan:
-
-```bash
-# Scan last 10 posts from all configured channels
-python outreach.py 10
-
-# Scan specific channel
-python outreach.py 10 -1001782596777
-```
-
-### Rate Limiting
-
-Each channel has built-in rate limiting:
-- Default: 60 posts per hour maximum
-- Prevents spam and API limits
-- Configurable per channel via `max_posts_per_hour`
-
-### Finding Channel ID
-
-Use one of these methods:
-
-1. **Forward to @getmyidbot** — Forward a post from the channel, bot shows ID
-2. **Use the script** — Run `python get_channel_id.py`
-3. **Manual** — ID format is `-100` + 10 digits (e.g., `-1001782596777`)
-
-## Chat Modes
-
-| Mode | Behavior |
-|------|----------|
-| `OFF` | Agent ignores this chat completely |
-| `WATCH` | Agent notifies owner about messages, doesn't reply |
-| `DRAFT` | Agent generates reply draft for owner approval |
-| `AUTO` | Agent replies automatically (trusted chats only) |
-
-### Mode Recommendations
-
-- **Unknown chats**: Start with `OFF` or `WATCH`
-- **Important contacts**: Use `DRAFT` for review
-- **Trusted frequent chats**: Consider `AUTO` after testing
-- **Never use AUTO** for: groups, unknown contacts, business chats
-
-## Safety Features
-
-### Built-in Protections
-
-1. **Global pause** — Agent starts disabled (`AGENT_GLOBAL_ENABLED=false`)
-2. **Draft by default** — `DEFAULT_CHAT_MODE=DRAFT` requires approval
-3. **Trusted requirement** — AUTO mode only works for trusted chats
-4. **Cooldown** — Prevents spam (default 120 seconds between replies)
-5. **Owner takeover** — Pauses after owner activity
-6. **Bot filtering** — Doesn't reply to bot messages
-7. **Money/commitment detection** — Flags sensitive topics for review
-
-### Sensitive Topic Detection
-
-The agent automatically requires manual review for messages involving:
-- Money, payments, transfers
-- Meetings, appointments, deadlines
-- Commitments, promises, guarantees
-- Conflict, complaints, aggression
-- Personal data (phone, address, cards)
-
-## Human-in-the-Loop (HITL)
-
-When a draft is generated:
-
-1. Control bot sends message with proposed reply
-2. Message includes `[✅ Approve]` and `[❌ Reject]` buttons
-3. Owner clicks to approve or reject
-4. Approved messages are sent via userbot
-5. All actions are logged in SQLite
-
-## Database Schema
-
-### ChatSettings
-- `id`, `chat_id`, `chat_title`
-- `mode` (OFF/WATCH/DRAFT/AUTO)
-- `is_trusted`
-- `last_incoming_message_id`
-- `last_agent_reply_at`
-- `paused_until`
-
-### MessageLog
-- `id`, `chat_id`, `message_id`
-- `sender_id`, `direction`
-- `text`, `created_at`
-
-### PendingAction
-- `id`, `action_type` (reply/send_message)
-- `chat_id`, `reply_to_message_id`
-- `text`, `status`
-- `created_at`, `decided_at`
-
-### GlobalState
-- Key-value store for agent settings
-
-## Docker Deployment
-
-```bash
-# Build and run
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop
-docker-compose down
-```
-
-**Note:** Session file and database are persisted in `./data/`
-
-## Testing
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=tg_agent --cov-report=html
-
-# Run specific test
-pytest tests/test_policy.py -v
-```
-
-> Note: the project targets Python 3.11/3.12. On systems where `python` points at Python 2, use `python3 -m pytest`.
-
-To check live LLM/OAuth connectivity (not a unit test, makes a real provider call):
+For ChatGPT OAuth connectivity, run the standalone smoke test before debugging Telegram behavior:
 
 ```bash
 python -m tg_agent.smoke_llm
 ```
 
-## Project Structure
+OAuth/runtime credentials belong only under ignored local `data/` paths. Never commit token/session files.
 
+## Prompts
+
+```text
+prompts/system.ru.txt
+prompts/persona.ru.txt
+prompts/safety.ru.txt
+prompts/reply/default.txt
+prompts/reply/<chat_id>.txt
+prompts/outreach/default.txt
+prompts/outreach/<channel_id>.txt
 ```
-telegram-ai-userbot-agent/
-├── README.md
-├── .env.example
-├── .gitignore
-├── pyproject.toml
-├── docker-compose.yml
-├── Dockerfile
+
+Prompt layers are resolved dynamically. Specific chat/channel prompt files override their respective defaults.
+
+## State and safety
+
+Important controls:
+
+- global runtime pause persisted in SQLite
+- DRAFT default for new/unknown chat workflows
+- trusted-chat requirement for normal AUTO replies
+- owner-takeover pause
+- persisted cooldown checks
+- deterministic bot/sensitive-topic policy checks
+- durable HITL action state
+- durable outreach contact state and hourly counting
+- audit logging for agent/MCP sends
+- MCP HTTP binding restricted to loopback addresses
+- `MCP_ALLOW_WRITES` kill switch
+
+Direct MCP send is intended for an explicit owner instruction such as “напиши/ответь/отправь”. Research wording such as “посмотри/найди/проверь” should remain read-only. Repeated/multi-contact sending should use a named workflow instead of loops of raw send calls.
+
+## Database
+
+Main tables:
+
+- `ChatSettings` — per-chat mode/trust/cooldown/takeover state
+- `MessageLog` — incoming, draft and sent audit records
+- `PendingAction` — HITL lifecycle
+- `GlobalState` — runtime state such as `agent_enabled`
+- `MonitoredChannel` — channel monitoring/outreach configuration
+- `OutreachContact` — durable outreach dedup/result/rate-limit data
+
+## Testing and linting
+
+Run locally:
+
+```bash
+python -m compileall -q src tests
+ruff check src tests
+pytest -q --cov=tg_agent --cov-report=term-missing
+```
+
+GitHub Actions runs the same checks on Python 3.11 and 3.12.
+
+The MCP test suite uses the official in-memory MCP client so tool discovery and invocation are tested at the protocol layer without needing a live Telegram account.
+
+## Docker
+
+```bash
+docker-compose up -d
+docker-compose logs -f
+docker-compose down
+```
+
+Persist `./data/` so the Telegram session, SQLite database and local OAuth material survive container recreation. MCP remains loopback-only by default; expose it remotely only through a private authenticated tunnel/VPN design.
+
+## Project structure
+
+```text
+agentTG/
+├── .claude/skills/          # Claude Code project skills
+├── .github/workflows/       # CI
+├── .mcp.json                # project MCP connection for Claude Code
+├── docs/
+│   ├── AGENT_PLATFORM_ARCHITECTURE.md
+│   └── MCP.md
 ├── prompts/
-│   ├── system.ru.txt      # Main system prompt
-│   └── safety.ru.txt      # Safety constraints
 ├── src/tg_agent/
-│   ├── __init__.py
-│   ├── main.py            # Entry point
-│   ├── config.py          # Settings
-│   ├── logging.py         # Logging setup
-│   ├── smoke_llm.py       # LLM/OAuth connectivity smoke test
-│   ├── userbot/
-│   │   ├── client.py      # Telethon client
-│   │   ├── handlers.py    # Message handlers
-│   │   └── sender.py      # Message sender
-│   ├── control_bot/
-│   │   ├── bot.py         # aiogram bot
-│   │   ├── handlers.py    # Command handlers
-│   │   ├── keyboards.py   # Inline keyboards
-│   │   └── hitl.py        # HITL approval
-│   ├── agent/
-│   │   ├── llm.py         # LLM client
-│   │   ├── prompts.py     # Prompt management
-│   │   ├── reply.py       # Reply generation
-│   │   └── models.py      # Agent models
-│   ├── policy/
-│   │   ├── modes.py       # Chat modes
-│   │   ├── filters.py     # Message filters
-│   │   ├── cooldown.py    # Rate limiting
-│   │   └── gate.py        # Policy decisions
-│   ├── storage/
-│   │   ├── db.py          # Database
-│   │   ├── models.py      # SQLModel tables
-│   │   └── repositories.py# Data access
-│   └── humanizer/
-│       └── delays.py      # Typing simulation
+│   ├── agent/               # LLM, prompts, reply generation
+│   ├── control_bot/         # aiogram owner controls + HITL
+│   ├── humanizer/           # typing simulation
+│   ├── policy/              # deterministic policy/cooldown
+│   ├── services/            # shared application services
+│   ├── skills/              # reusable named workflows
+│   ├── storage/             # SQLite models/repositories
+│   ├── userbot/             # Telethon client/events/outreach
+│   ├── mcp_config.py
+│   ├── mcp_server.py
+│   └── main.py
 └── tests/
-    ├── test_policy.py
-    ├── test_cooldown.py
-    ├── test_hitl.py
-    ├── test_llm_provider_selection.py
-    ├── test_oauth_config.py        # ChatGPT OAuth config hardening
-    └── test_smoke_llm.py           # smoke_llm entrypoint
 ```
 
-## Roadmap
+## Security note
 
-### Phase 2 (Future)
-
-- [ ] MCP layer via fast-mcp-telegram
-- [ ] Pydantic AI integration
-- [ ] Task scheduler for delayed actions
-- [ ] Channel summaries and digests
-- [ ] RAG with Qdrant for long-term memory
-- [ ] Voice messages via Whisper
-- [ ] Multi-agent workflows
-- [ ] Web dashboard
-
-### Phase 3 (Advanced)
-
-- [ ] Fine-tuned models for specific style
-- [ ] Multi-account support
-- [ ] Advanced analytics
-- [ ] Integration with external tools (calendar, tasks)
-
-## Troubleshooting
-
-### "TG_API_HASH must be set"
-- Copy `.env.example` to `.env`
-- Fill in your actual API credentials
-
-### "CONTROL_BOT_TOKEN must be set"
-- Create a bot via @BotFather
-- Add the token to `.env`
-
-### Login code not received
-- Wait a few minutes
-- Try restarting the application
-- Check if phone number is correct in `.env`
-
-### LLM provider fails
-- Check if API keys are valid
-- Try switching to a different provider
-- Check network connectivity
-
-### Messages not being processed
-- Check `/status` — agent may be paused
-- Verify chat mode is not `OFF`
-- Check logs for errors
-
-## License
-
-MIT License — see LICENSE file.
-
-## Disclaimer
-
-This project is for educational and personal use only. The authors are not responsible for:
-- Violation of Telegram Terms of Service
-- Account bans or restrictions
-- Misuse of the software
-- Any damages resulting from use
-
-Use responsibly and at your own risk.
+Removing a credential file from the current tree does not invalidate a credential that was previously committed. If a token/session credential has ever entered Git history, revoke/rotate it and rewrite reachable Git history separately; do not treat `.gitignore` alone as remediation.
