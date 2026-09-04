@@ -56,6 +56,7 @@ class ChannelConfig:
         keywords: Filter posts by keywords (empty = all posts)
         max_posts_per_hour: Rate limit for posts from this channel
     """
+
     channel_id: int
     title: str = ""
     enabled: bool = True
@@ -84,8 +85,8 @@ class ChannelConfig:
 
         try:
             channel_id = int(parts[0])
-        except ValueError:
-            raise ValueError(f"Invalid channel ID: {parts[0]}")
+        except ValueError as exc:
+            raise ValueError(f"Invalid channel ID: {parts[0]}") from exc
 
         title = parts[1] if len(parts) > 1 and parts[1] else ""
         auto_outreach = len(parts) > 2 and parts[2].lower() == "outreach"
