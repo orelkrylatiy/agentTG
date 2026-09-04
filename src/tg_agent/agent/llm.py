@@ -114,7 +114,9 @@ class LLMClient:
             os.environ["CHATGPT_ORIGINATOR"] = self.settings.chatgpt_originator
 
         if self.settings.openai_api_key:
-            litellm.openai_api_key = self.settings.openai_api_key
+            litellm.openai_key = self.settings.openai_api_key
+            import os as _os
+            _os.environ["OPENAI_API_KEY"] = self.settings.openai_api_key
         if api_base := str(self.settings.openai_api_base or ""):
             os.environ["OPENAI_API_BASE"] = api_base
         if self.settings.openrouter_api_key:
