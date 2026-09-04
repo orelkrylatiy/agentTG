@@ -25,10 +25,10 @@ except ImportError:  # pragma: no cover
 class ChatMode(str, Enum):
     """Chat processing modes."""
 
-    OFF = "OFF"  # Do nothing
-    WATCH = "WATCH"  # Only notify owner
-    DRAFT = "DRAFT"  # Generate draft for approval
-    AUTO = "AUTO"  # Auto-reply (trusted chats only)
+    OFF = "OFF"
+    WATCH = "WATCH"
+    DRAFT = "DRAFT"
+    AUTO = "AUTO"
 
 
 class MessageDirection(str, Enum):
@@ -44,10 +44,19 @@ class ActionStatus(str, Enum):
     """Pending action status."""
 
     PENDING = "pending"
+    EXECUTING = "executing"
     APPROVED = "approved"
     REJECTED = "rejected"
     EXECUTED = "executed"
     EXPIRED = "expired"
+
+
+class OutreachStatus(str, Enum):
+    """Durable state for an outreach contact attempt."""
+
+    PENDING = "pending"
+    SENT = "sent"
+    FAILED = "failed"
 
 
 @model_dataclass
@@ -85,12 +94,12 @@ class MessageLog(SQLModel, table=True):
 
 @model_dataclass
 class PendingAction(SQLModel, table=True):
-    """Actions pending owner approval."""
+    """Actions pending owner approval or currently being executed."""
 
     __tablename__ = "pending_actions"
 
     id: int | None = Field(default=None, primary_key=True)
-    action_type: str = Field(...)  # reply, send_message
+    action_type: str = Field(...)
     chat_id: int = Field(..., index=True)
     reply_to_message_id: int | None = Field(default=None)
     text: str = Field(...)
@@ -122,7 +131,26 @@ class MonitoredChannel(SQLModel, table=True):
     channel_title: str | None = Field(default=None)
     enabled: bool = Field(default=True)
     auto_outreach: bool = Field(default=False)
-    keywords: str | None = Field(default=None)  # comma-separated
+    keywords: str | None = Field(default=None)
+    # Kept for backward-compatible schema. Runtime treats this as the maximum
+    # number of automatic outreach DMs per hour for this channel.
     max_posts_per_hour: int = Field(default=60)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+@model_dataclass
+class OutreachContact(SQLModel, table=True):
+    """Durable deduplication and audit record for automatic outreach."""
+
+    __tablename__ = "outreach_contacts"
+
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(..., unique=True, index=True)
+    channel_id: int = Field(..., index=True)
+    status: OutreachStatus = Field(default=OutreachStatus.PENDING, index=True)
+    sent_message_id: int | None = Field(default=None)
+    last_error: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    sent_at: datetime | None = Field(default=None, index=True)

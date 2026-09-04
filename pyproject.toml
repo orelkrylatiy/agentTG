@@ -9,9 +9,6 @@ description = "Personal Telegram AI userbot agent with control bot and HITL"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [
-    {name = "Your Name", email = "your.email@example.com"}
-]
 keywords = ["telegram", "ai", "userbot", "telethon", "aiogram", "llm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -45,8 +42,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/telegram-ai-userbot-agent"
-Repository = "https://github.com/yourusername/telegram-ai-userbot-agent.git"
+Homepage = "https://github.com/orelkrylatiy/agentTG"
+Repository = "https://github.com/orelkrylatiy/agentTG.git"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -64,6 +61,8 @@ target-version = ["py311", "py312"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
 ignore = ["E501"]
 

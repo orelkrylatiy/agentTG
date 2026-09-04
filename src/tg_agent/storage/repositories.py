@@ -34,6 +34,8 @@ from tg_agent.storage.models import (
     MessageDirection,
     MessageLog,
     MonitoredChannel,
+    OutreachContact,
+    OutreachStatus,
     PendingAction,
 )
 
@@ -47,7 +49,6 @@ class ChatSettingsRepo:
         self.session = session
 
     def get_by_chat_id(self, chat_id: int) -> ChatSettings | None:
-        """Get chat settings by chat ID."""
         statement = select(ChatSettings).where(ChatSettings.chat_id == chat_id)
         return self.session.exec(statement).first()
 
@@ -57,7 +58,6 @@ class ChatSettingsRepo:
         default_mode: ChatMode = ChatMode.OFF,
         chat_title: str | None = None,
     ) -> ChatSettings:
-        """Get existing settings or create new with defaults."""
         settings = self.get_by_chat_id(chat_id)
         if settings is None:
             settings = ChatSettings(
@@ -78,7 +78,6 @@ class ChatSettingsRepo:
         return settings
 
     def update_mode(self, chat_id: int, mode: ChatMode) -> ChatSettings:
-        """Update chat mode."""
         settings = self.get_or_create(chat_id)
         settings.mode = mode
         settings.updated_at = datetime.utcnow()
@@ -88,7 +87,6 @@ class ChatSettingsRepo:
         return settings
 
     def set_trusted(self, chat_id: int, trusted: bool = True) -> ChatSettings:
-        """Set chat trusted status."""
         settings = self.get_or_create(chat_id)
         settings.is_trusted = trusted
         settings.updated_at = datetime.utcnow()
@@ -98,33 +96,36 @@ class ChatSettingsRepo:
         return settings
 
     def update_last_message(self, chat_id: int, message_id: int) -> None:
-        """Update last incoming message ID for a chat."""
         settings = self.get_or_create(chat_id)
         settings.last_incoming_message_id = message_id
         settings.updated_at = datetime.utcnow()
         self.session.commit()
 
-    def update_last_agent_reply(self, chat_id: int, replied_at: datetime | None = None) -> None:
-        """Update the last agent reply timestamp."""
+    def update_last_agent_reply(
+        self,
+        chat_id: int,
+        replied_at: datetime | None = None,
+    ) -> None:
         settings = self.get_or_create(chat_id)
         settings.last_agent_reply_at = replied_at or datetime.utcnow()
         settings.updated_at = datetime.utcnow()
         self.session.commit()
 
     def set_paused_until(self, chat_id: int, until: datetime | None) -> None:
-        """Set pause until time for a chat."""
         settings = self.get_or_create(chat_id)
         settings.paused_until = until
         settings.updated_at = datetime.utcnow()
         self.session.commit()
 
     def get_all(self) -> list[ChatSettings]:
-        """Get all chat settings."""
         return list(self.session.exec(select(ChatSettings)).all())
 
     def get_by_mode(self, mode: ChatMode) -> list[ChatSettings]:
-        """Get all chats with specific mode."""
-        return list(self.session.exec(select(ChatSettings).where(ChatSettings.mode == mode)).all())
+        return list(
+            self.session.exec(
+                select(ChatSettings).where(ChatSettings.mode == mode)
+            ).all()
+        )
 
 
 class MessageLogRepo:
@@ -141,7 +142,6 @@ class MessageLogRepo:
         sender_id: int | None = None,
         text: str | None = None,
     ) -> MessageLog:
-        """Create a new message log entry."""
         log_entry = MessageLog(
             chat_id=chat_id,
             message_id=message_id,
@@ -160,7 +160,6 @@ class MessageLogRepo:
         message_id: int,
         direction: MessageDirection | None = None,
     ) -> bool:
-        """Return True if a matching message log entry already exists."""
         statement = select(MessageLog).where(
             MessageLog.chat_id == chat_id,
             MessageLog.message_id == message_id,
@@ -170,22 +169,20 @@ class MessageLogRepo:
         return self.session.exec(statement.limit(1)).first() is not None
 
     def get_recent(self, chat_id: int, limit: int = 10) -> list[MessageLog]:
-        """Get recent messages for a chat."""
         statement = select(MessageLog).order_by(MessageLog.created_at.desc()).limit(limit)
         if chat_id:
             statement = statement.where(MessageLog.chat_id == chat_id)
         return list(self.session.exec(statement).all())
 
     def get_most_recent(self) -> MessageLog | None:
-        """Get the most recent log entry across all chats."""
         return self.session.exec(
             select(MessageLog).order_by(MessageLog.created_at.desc()).limit(1)
         ).first()
 
     def get_most_recent_by_direction(
-        self, direction: MessageDirection
+        self,
+        direction: MessageDirection,
     ) -> MessageLog | None:
-        """Get the most recent log entry for a specific direction."""
         return self.session.exec(
             select(MessageLog)
             .where(MessageLog.direction == direction)
@@ -194,7 +191,6 @@ class MessageLogRepo:
         ).first()
 
     def get_previous_sender_id(self, chat_id: int) -> int | None:
-        """Get sender id from the latest known message in the chat."""
         log_entry = self.session.exec(
             select(MessageLog)
             .where(MessageLog.chat_id == chat_id)
@@ -204,7 +200,6 @@ class MessageLogRepo:
         return log_entry.sender_id if log_entry else None
 
     def get_last_n_messages(self, chat_id: int, n: int = 12) -> list[MessageLog]:
-        """Get last N messages for context."""
         return list(
             self.session.exec(
                 select(MessageLog)
@@ -228,7 +223,6 @@ class PendingActionRepo:
         text: str,
         reply_to_message_id: int | None = None,
     ) -> PendingAction:
-        """Create a new pending action."""
         action = PendingAction(
             action_type=action_type,
             chat_id=chat_id,
@@ -242,21 +236,45 @@ class PendingActionRepo:
         return action
 
     def get_by_id(self, action_id: int) -> PendingAction | None:
-        """Get pending action by ID."""
         return self.session.get(PendingAction, action_id)
 
     def get_pending(self) -> list[PendingAction]:
-        """Get all pending actions."""
         return list(
             self.session.exec(
                 select(PendingAction).where(PendingAction.status == ActionStatus.PENDING)
             ).all()
         )
 
-    def approve(self, action_id: int) -> PendingAction | None:
-        """Approve a pending action."""
+    def claim_for_execution(self, action_id: int) -> PendingAction | None:
+        """Atomically-ish claim a pending action before doing the side effect.
+
+        SQLite serializes the commit. A second approval handler will observe the
+        EXECUTING state and refuse to send the same action twice.
+        """
         action = self.get_by_id(action_id)
-        if action and action.status == ActionStatus.PENDING:
+        if action is None or action.status != ActionStatus.PENDING:
+            return None
+        action.status = ActionStatus.EXECUTING
+        self.session.commit()
+        self.session.refresh(action)
+        logger.info(f"Claimed action {action_id} for execution")
+        return action
+
+    def reset_pending(self, action_id: int) -> PendingAction | None:
+        """Return a failed execution claim to PENDING so the owner may retry."""
+        action = self.get_by_id(action_id)
+        if action and action.status == ActionStatus.EXECUTING:
+            action.status = ActionStatus.PENDING
+            self.session.commit()
+            self.session.refresh(action)
+            logger.warning(f"Reset action {action_id} to pending after send failure")
+            return action
+        return None
+
+    def approve(self, action_id: int) -> PendingAction | None:
+        """Legacy explicit approval transition."""
+        action = self.get_by_id(action_id)
+        if action and action.status in (ActionStatus.PENDING, ActionStatus.EXECUTING):
             action.status = ActionStatus.APPROVED
             action.decided_at = datetime.utcnow()
             self.session.commit()
@@ -266,7 +284,6 @@ class PendingActionRepo:
         return None
 
     def reject(self, action_id: int) -> PendingAction | None:
-        """Reject a pending action."""
         action = self.get_by_id(action_id)
         if action and action.status == ActionStatus.PENDING:
             action.status = ActionStatus.REJECTED
@@ -277,8 +294,11 @@ class PendingActionRepo:
             return action
         return None
 
-    def mark_executed(self, action_id: int, executed_message_id: int) -> PendingAction | None:
-        """Mark action as executed."""
+    def mark_executed(
+        self,
+        action_id: int,
+        executed_message_id: int,
+    ) -> PendingAction | None:
         action = self.get_by_id(action_id)
         if action:
             action.status = ActionStatus.EXECUTED
@@ -291,7 +311,6 @@ class PendingActionRepo:
         return None
 
     def get_recent(self, limit: int = 10) -> list[PendingAction]:
-        """Get recent actions."""
         return list(
             self.session.exec(
                 select(PendingAction).order_by(PendingAction.created_at.desc()).limit(limit)
@@ -306,12 +325,10 @@ class GlobalStateRepo:
         self.session = session
 
     def get(self, key: str) -> str | None:
-        """Get value by key."""
         state = self.session.get(GlobalState, key)
         return state.value if state else None
 
     def set(self, key: str, value: str) -> GlobalState:
-        """Set value for key."""
         state = self.session.get(GlobalState, key)
         if state is None:
             state = GlobalState(key=key, value=value)
@@ -324,14 +341,12 @@ class GlobalStateRepo:
         return state
 
     def get_bool(self, key: str, default: bool = False) -> bool:
-        """Get boolean value."""
         value = self.get(key)
         if value is None:
             return default
         return value.lower() in ("true", "1", "yes", "on")
 
     def set_bool(self, key: str, value: bool) -> GlobalState:
-        """Set boolean value."""
         return self.set(key, "true" if value else "false")
 
 
@@ -342,12 +357,16 @@ class MonitoredChannelRepo:
         self.session = session
 
     def get_all(self) -> list[MonitoredChannel]:
-        """Get all monitored channels."""
-        return self.session.exec(select(MonitoredChannel).where(MonitoredChannel.enabled == True)).all()
+        return list(
+            self.session.exec(
+                select(MonitoredChannel).where(MonitoredChannel.enabled == True)  # noqa: E712
+            ).all()
+        )
 
     def get_by_id(self, channel_id: int) -> MonitoredChannel | None:
-        """Get channel by ID."""
-        return self.session.exec(select(MonitoredChannel).where(MonitoredChannel.channel_id == channel_id)).first()
+        return self.session.exec(
+            select(MonitoredChannel).where(MonitoredChannel.channel_id == channel_id)
+        ).first()
 
     def add(
         self,
@@ -356,7 +375,6 @@ class MonitoredChannelRepo:
         auto_outreach: bool = False,
         keywords: list[str] | None = None,
     ) -> MonitoredChannel:
-        """Add or update monitored channel."""
         existing = self.get_by_id(channel_id)
         if existing:
             existing.channel_title = channel_title
@@ -367,21 +385,20 @@ class MonitoredChannelRepo:
             self.session.refresh(existing)
             logger.info(f"Updated monitored channel {channel_id}")
             return existing
-        else:
-            channel = MonitoredChannel(
-                channel_id=channel_id,
-                channel_title=channel_title,
-                auto_outreach=auto_outreach,
-                keywords=",".join(keywords) if keywords else None,
-            )
-            self.session.add(channel)
-            self.session.commit()
-            self.session.refresh(channel)
-            logger.info(f"Added monitored channel {channel_id}")
-            return channel
+
+        channel = MonitoredChannel(
+            channel_id=channel_id,
+            channel_title=channel_title,
+            auto_outreach=auto_outreach,
+            keywords=",".join(keywords) if keywords else None,
+        )
+        self.session.add(channel)
+        self.session.commit()
+        self.session.refresh(channel)
+        logger.info(f"Added monitored channel {channel_id}")
+        return channel
 
     def remove(self, channel_id: int) -> bool:
-        """Remove monitored channel by ID. Returns True if removed."""
         channel = self.get_by_id(channel_id)
         if channel:
             self.session.delete(channel)
@@ -391,8 +408,11 @@ class MonitoredChannelRepo:
         logger.warning(f"Channel {channel_id} not found")
         return False
 
-    def set_enabled(self, channel_id: int, enabled: bool) -> MonitoredChannel | None:
-        """Enable or disable a channel."""
+    def set_enabled(
+        self,
+        channel_id: int,
+        enabled: bool,
+    ) -> MonitoredChannel | None:
         channel = self.get_by_id(channel_id)
         if channel:
             channel.enabled = enabled
@@ -401,3 +421,84 @@ class MonitoredChannelRepo:
             self.session.refresh(channel)
             return channel
         return None
+
+
+class OutreachContactRepo:
+    """Durable deduplication, retry state, and per-channel outreach audit."""
+
+    def __init__(self, session: Session | AsyncSession):
+        self.session = session
+
+    def get_by_username(self, username: str) -> OutreachContact | None:
+        normalized = username.lower().lstrip("@")
+        return self.session.exec(
+            select(OutreachContact).where(OutreachContact.username == normalized)
+        ).first()
+
+    def claim(self, username: str, channel_id: int) -> OutreachContact | None:
+        """Claim a username for sending.
+
+        SENT and PENDING contacts are deduplicated. FAILED contacts may be retried.
+        """
+        normalized = username.lower().lstrip("@")
+        existing = self.get_by_username(normalized)
+        if existing:
+            if existing.status in (OutreachStatus.SENT, OutreachStatus.PENDING):
+                return None
+            existing.status = OutreachStatus.PENDING
+            existing.channel_id = channel_id
+            existing.last_error = None
+            existing.updated_at = datetime.utcnow()
+            self.session.commit()
+            self.session.refresh(existing)
+            return existing
+
+        contact = OutreachContact(
+            username=normalized,
+            channel_id=channel_id,
+            status=OutreachStatus.PENDING,
+        )
+        self.session.add(contact)
+        self.session.commit()
+        self.session.refresh(contact)
+        return contact
+
+    def mark_sent(
+        self,
+        username: str,
+        sent_message_id: int,
+    ) -> OutreachContact | None:
+        contact = self.get_by_username(username)
+        if contact is None:
+            return None
+        now = datetime.utcnow()
+        contact.status = OutreachStatus.SENT
+        contact.sent_message_id = sent_message_id
+        contact.sent_at = now
+        contact.updated_at = now
+        contact.last_error = None
+        self.session.commit()
+        self.session.refresh(contact)
+        return contact
+
+    def mark_failed(self, username: str, error: str) -> OutreachContact | None:
+        contact = self.get_by_username(username)
+        if contact is None:
+            return None
+        contact.status = OutreachStatus.FAILED
+        contact.last_error = error[:1000]
+        contact.updated_at = datetime.utcnow()
+        self.session.commit()
+        self.session.refresh(contact)
+        return contact
+
+    def count_sent_since(self, channel_id: int, since: datetime) -> int:
+        return len(
+            self.session.exec(
+                select(OutreachContact).where(
+                    OutreachContact.channel_id == channel_id,
+                    OutreachContact.status == OutreachStatus.SENT,
+                    OutreachContact.sent_at >= since,
+                )
+            ).all()
+        )

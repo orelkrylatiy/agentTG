@@ -36,10 +36,7 @@ except ImportError:  # pragma: no cover
         pass
 
 from tg_agent.logging import get_logger
-from tg_agent.storage.models import (
-    GlobalState,
-    MonitoredChannel,
-)
+from tg_agent.storage.models import GlobalState
 
 if TYPE_CHECKING:
     from tg_agent.config import Settings
@@ -59,12 +56,6 @@ class Database:
         default_agent_enabled: bool | None = None,
         default_chat_mode: str | None = None,
     ):
-        """
-        Initialize database connection.
-
-        Args:
-            database_url: SQLAlchemy database URL. Defaults to settings.
-        """
         if database_url is None:
             from tg_agent.config import get_settings
 
@@ -89,9 +80,7 @@ class Database:
 
     @property
     def engine(self):
-        """Get or create database engine."""
         if self._engine is None:
-            # For SQLite, we need check_same_thread=False for async
             connect_args = {"check_same_thread": False}
             self._engine = create_engine(
                 self.database_url,
@@ -102,30 +91,23 @@ class Database:
         return self._engine
 
     async def init_db(self) -> None:
-        """Create all tables if they don't exist."""
         logger.info("Initializing database...")
 
-        # Ensure data directory exists
         db_path = self.database_url.replace("sqlite:///", "")
         db_dir = Path(db_path).parent
         db_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create tables
         SQLModel.metadata.create_all(self.engine)
-
-        # Initialize default global state
         self._init_default_state()
-        
-        # Migrate channels from .env to database if needed
         self._migrate_channels_from_env()
 
         logger.info("Database initialized successfully")
-    
+
     def _migrate_channels_from_env(self) -> None:
-        """Migrate MONITORED_CHANNELS from .env to database."""
+        """Migrate MONITORED_CHANNELS from .env to database once."""
         from tg_agent.config import get_settings
         from tg_agent.storage.repositories import MonitoredChannelRepo
-        
+
         try:
             settings = get_settings()
             channel_configs = settings.channel_configs
@@ -137,7 +119,6 @@ class Database:
 
                 repo = MonitoredChannelRepo(session)
                 migrated = 0
-                
                 for cfg in channel_configs:
                     existing = repo.get_by_id(cfg.channel_id)
                     if not existing:
@@ -153,11 +134,10 @@ class Database:
                 session.commit()
                 if migrated > 0:
                     logger.info(f"Migrated {migrated} channel(s) from .env to database")
-        except Exception as e:
-            logger.warning(f"Failed to migrate channels from .env: {e}")
+        except Exception as exc:
+            logger.warning(f"Failed to migrate channels from .env: {exc}")
 
     def _init_default_state(self) -> None:
-        """Initialize default global state entries."""
         try:
             from sqlmodel import Session
         except ImportError:  # pragma: no cover
@@ -171,33 +151,22 @@ class Database:
                 ),
                 ("default_mode", self.default_chat_mode),
             ]
-
             for key, value in defaults:
                 existing = session.get(GlobalState, key)
                 if existing is None:
-                    state = GlobalState(key=key, value=value)
-                    session.add(state)
-
+                    session.add(GlobalState(key=key, value=value))
             session.commit()
 
     async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
-        """
-        Get async database session.
-
-        Yields:
-            AsyncSession instance.
-        """
         async with AsyncSession(self.engine) as session:
             yield session
 
     def get_sync_session(self):
-        """Get sync session for operations that need it."""
         from sqlmodel import Session
 
         return Session(self.engine)
 
 
-# Global database instance
 _db_instance: Database | None = None
 
 

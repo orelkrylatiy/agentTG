@@ -4,19 +4,20 @@ Application configuration using pydantic-settings.
 
 from __future__ import annotations
 
-from functools import lru_cache
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Deferred import to avoid circular dependency
-# ChannelConfig is only used in properties, not in the class definition
 from tg_agent.logging import get_logger
+
+if TYPE_CHECKING:
+    from tg_agent.userbot.channel_config import ChannelConfig
 
 
 class Settings(BaseSettings):
@@ -54,9 +55,7 @@ class Settings(BaseSettings):
     owner_telegram_id: int = Field(..., alias="OWNER_TELEGRAM_ID")
 
     # Database
-    database_url: str = Field(
-        default="sqlite:///./data/agent.db", alias="DATABASE_URL"
-    )
+    database_url: str = Field(default="sqlite:///./data/agent.db", alias="DATABASE_URL")
 
     # Agent state
     agent_global_enabled: bool = Field(default=False, alias="AGENT_GLOBAL_ENABLED")
@@ -70,16 +69,12 @@ class Settings(BaseSettings):
     )
     llm_model: str = Field(default="chatgpt/gpt-5", alias="LLM_MODEL")
     litellm_chatgpt_enabled: bool = Field(default=True, alias="LITELLM_CHATGPT_ENABLED")
-    chatgpt_token_dir: str = Field(
-        default="data/litellm/chatgpt", alias="CHATGPT_TOKEN_DIR"
-    )
+    chatgpt_token_dir: str = Field(default="data/litellm/chatgpt", alias="CHATGPT_TOKEN_DIR")
     chatgpt_auth_file: str = Field(default="auth.json", alias="CHATGPT_AUTH_FILE")
     chatgpt_api_base: str = Field(
         default="https://chatgpt.com/backend-api/codex", alias="CHATGPT_API_BASE"
     )
-    chatgpt_originator: str = Field(
-        default="codex_cli_rs", alias="CHATGPT_ORIGINATOR"
-    )
+    chatgpt_originator: str = Field(default="codex_cli_rs", alias="CHATGPT_ORIGINATOR")
 
     # Fallback providers
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
@@ -126,7 +121,6 @@ class Settings(BaseSettings):
             part = part.strip()
             if part:
                 try:
-                    # Extract just the channel_id from spec string
                     channel_id = int(part.split(":")[0])
                     result.append(channel_id)
                 except ValueError:
@@ -137,7 +131,7 @@ class Settings(BaseSettings):
     def channel_configs(self) -> list[ChannelConfig]:
         """Parse MONITORED_CHANNELS into list of ChannelConfig objects."""
         from tg_agent.userbot.channel_config import ChannelConfig
-        
+
         if not self.monitored_channels:
             return []
         result = []
@@ -148,9 +142,9 @@ class Settings(BaseSettings):
                     config = ChannelConfig.from_string(part)
                     if config.enabled:
                         result.append(config)
-                except ValueError as e:
+                except ValueError as exc:
                     logger = get_logger(__name__)
-                    logger.warning(f"Skipping invalid channel config '{part}': {e}")
+                    logger.warning(f"Skipping invalid channel config '{part}': {exc}")
         return result
 
     def _channel_specs(self) -> list[str]:
@@ -163,8 +157,6 @@ class Settings(BaseSettings):
 
     def get_channel_config(self, channel_id: int) -> ChannelConfig | None:
         """Get configuration for a specific channel by ID."""
-        from tg_agent.userbot.channel_config import ChannelConfig
-        
         for config in self.channel_configs:
             if config.channel_id == channel_id:
                 return config
@@ -254,7 +246,11 @@ class Settings(BaseSettings):
     def chatgpt_token_dir_path(self) -> Path:
         """Return the effective LiteLLM ChatGPT token directory."""
         token_dir = Path(os.path.expanduser(self.chatgpt_token_dir))
-        resolved = token_dir.resolve() if token_dir.is_absolute() else (self.project_root / token_dir).resolve()
+        resolved = (
+            token_dir.resolve()
+            if token_dir.is_absolute()
+            else (self.project_root / token_dir).resolve()
+        )
         if not resolved.is_relative_to(self.project_root):
             raise ValueError("CHATGPT_TOKEN_DIR must stay inside the project root")
         return resolved

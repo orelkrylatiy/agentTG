@@ -24,15 +24,18 @@ os.environ["DATABASE_URL"] = "sqlite:///./test_data/test.db"
 
 @pytest.fixture(autouse=True)
 def setup_test_environment(tmp_path):
-    """Setup test environment for each test."""
-    # Create test data directory
+    """Set isolated environment/settings state for every test."""
+    from tg_agent.config import get_settings
+
     test_data = tmp_path / "test_data"
     test_data.mkdir(parents=True, exist_ok=True)
-
-    # Set test database path
     os.environ["DATABASE_URL"] = f"sqlite:///{test_data}/test.db"
+
+    # Settings is intentionally cached in production. Tests that mutate env vars
+    # must not leak one test's parsed configuration into the next test.
+    get_settings.cache_clear()
 
     yield
 
-    # Cleanup
+    get_settings.cache_clear()
     os.environ.pop("DATABASE_URL", None)
