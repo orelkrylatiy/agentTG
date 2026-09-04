@@ -59,6 +59,10 @@ data/*.sqlite
 data/litellm/**/auth.json
 data/litellm/**/*token*
 
+# Login helper/runtime state
+data/.login_hash
+data/.login_state.json
+
 # Runtime state
 # Outreach/contact state belongs in SQLite. Ignore legacy JSON if present locally.
 data/contacted.json
