@@ -123,15 +123,23 @@ class ChannelHandler:
         post_text: str,
         channel_id: int,
         max_per_hour: int = 60,
-    ) -> None:
+        max_contacts: int | None = None,
+    ) -> list[str]:
+        """Contact new usernames from a post and return successfully sent usernames."""
         matches = _CONTACT_RE.findall(post_text)
-        usernames = [m[0] or m[1] for m in matches if m[0] or m[1]]
+        usernames = [match[0] or match[1] for match in matches if match[0] or match[1]]
         usernames = list(dict.fromkeys(usernames))
+        if max_contacts is not None:
+            usernames = usernames[: max(0, max_contacts)]
         if not usernames:
-            return
+            return []
+
+        if self.llm_client is None:
+            return []
 
         system_prompt = self.prompt_manager.get_outreach_prompt(channel_id)
         hour_ago = datetime.utcnow() - timedelta(hours=1)
+        sent_usernames: list[str] = []
 
         for username in usernames:
             with self.db.get_sync_session() as session:
@@ -140,7 +148,7 @@ class ChannelHandler:
                     self.settings.agent_global_enabled,
                 ):
                     logger.info("Outreach stopped because agent was paused")
-                    return
+                    return sent_usernames
 
                 contact_repo = OutreachContactRepo(session)
                 sent_last_hour = contact_repo.count_sent_since(channel_id, hour_ago)
@@ -149,7 +157,7 @@ class ChannelHandler:
                         f"Outreach send limit reached for channel {channel_id}: "
                         f"{sent_last_hour}/{max_per_hour}"
                     )
-                    return
+                    return sent_usernames
 
                 claimed = contact_repo.claim(username, channel_id)
                 if claimed is None:
@@ -212,7 +220,9 @@ class ChannelHandler:
                         session.commit()
                         session.refresh(chat)
 
-                self._contacted.add(username.lower())
+                normalized = username.lower()
+                self._contacted.add(normalized)
+                sent_usernames.append(normalized)
                 logger.info(
                     f"Outreach: sent to @{username} and set chat {chat_id} "
                     "to DRAFT+trusted"
@@ -221,3 +231,5 @@ class ChannelHandler:
                 with self.db.get_sync_session() as session:
                     OutreachContactRepo(session).mark_failed(username, str(exc))
                 logger.warning(f"Outreach: failed to send to @{username}: {exc}")
+
+        return sent_usernames
