@@ -44,10 +44,10 @@ class ChannelHandler:
         self.db = db
         self.llm_client = llm_client
         self.prompt_manager = prompt_manager or PromptManager(settings)
+        # Compatibility/metrics only. Durable deduplication lives in SQLite.
+        self._contacted: set[str] = set()
 
     def register_handlers(self) -> None:
-        # Subscribe broadly and resolve the DB-backed channel policy per event so
-        # /add_channel and /remove_channel take effect without a restart.
         self.client.add_event_handler(self._on_channel_post, events.NewMessage())
         with self.db.get_sync_session() as session:
             channel_count = len(MonitoredChannelRepo(session).get_all())
@@ -111,8 +111,6 @@ class ChannelHandler:
             f"Forwarded channel post from {event.chat_id} ({channel_title})"
         )
 
-        # auto_outreach is an explicit workflow authorization configured by the
-        # owner. It is deliberately separate from reactive chat AUTO mode.
         if channel_config.auto_outreach and self.llm_client:
             await self._try_outreach(
                 post_text=message.text,
@@ -124,7 +122,7 @@ class ChannelHandler:
         self,
         post_text: str,
         channel_id: int,
-        max_per_hour: int,
+        max_per_hour: int = 60,
     ) -> None:
         matches = _CONTACT_RE.findall(post_text)
         usernames = [m[0] or m[1] for m in matches if m[0] or m[1]]
@@ -136,8 +134,6 @@ class ChannelHandler:
         hour_ago = datetime.utcnow() - timedelta(hours=1)
 
         for username in usernames:
-            # Re-read global runtime state between sends. /pause must stop a long
-            # batch immediately rather than only affecting the next channel post.
             with self.db.get_sync_session() as session:
                 if not GlobalStateRepo(session).get_bool(
                     "agent_enabled",
@@ -216,6 +212,7 @@ class ChannelHandler:
                         session.commit()
                         session.refresh(chat)
 
+                self._contacted.add(username.lower())
                 logger.info(
                     f"Outreach: sent to @{username} and set chat {chat_id} "
                     "to DRAFT+trusted"
