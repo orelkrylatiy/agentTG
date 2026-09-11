@@ -1,255 +1,315 @@
-# AgentTG target architecture: automation + MCP execution plane
+# agentTG architecture: Telegram execution plane + durable automation
+
+This document describes the current architecture and the intended next evolution of agentTG.
+
+Research behind the design decisions is summarized in [`RESEARCH_AGENT_AUTOMATION_PATTERNS.md`](RESEARCH_AGENT_AUTOMATION_PATTERNS.md).
 
 ## Goal
 
-AgentTG should be one reliable Telegram execution core that can be controlled from:
+agentTG is a **single Telegram execution core** controlled from several surfaces:
 
-1. the existing Telegram control bot;
-2. scheduled/recurrent workflows;
-3. a local or remote AI agent through MCP;
-4. CLI/dev commands.
+- Claude Code / another AI agent through MCP;
+- Telegram control bot;
+- live Telegram events;
+- reusable named workflows/skills;
+- future persistent watches and schedules.
 
-These entry points must reuse the same application services, policy checks, idempotency and audit trail. They must not call Telethon directly.
+All surfaces should reuse the same services, policy and state. They must not each implement their own Telegram side effects.
 
-## Architectural rule
+## Core rule
 
-**LLMs decide wording and semantic interpretation. Deterministic code decides permissions and side effects.**
+> LLMs decide wording and semantic interpretation. Deterministic code decides permissions and side effects.
 
-A message received from Telegram is untrusted input. Neither an internal LLM nor an external MCP client may expand its own permissions because of instructions contained in a message.
+Telegram messages and channel posts are untrusted input. Instructions contained inside Telegram content must never expand the permissions of the MCP client, workflow or agent processing them.
 
-## Layers
+## Current runtime
+
+Today agentTG intentionally uses **one long-running process**:
 
 ```text
-                         ┌──────────────────────┐
-                         │   Claude / AI agent  │
-                         └──────────┬───────────┘
-                                    │ MCP
-       ┌──────────────┐     ┌──────▼───────┐     ┌────────────────┐
-       │ Control Bot  │     │  MCP adapter │     │ Scheduler/CLI  │
-       └──────┬───────┘     └──────┬───────┘     └───────┬────────┘
-              │                    │                     │
-              └──────────────┬─────┴──────────────┬──────┘
-                             ▼                    ▼
-                     ┌─────────────────────────────────┐
-                     │       Application services      │
-                     │ Chat / Messaging / Outreach /   │
-                     │ Scan / Workflow / Action        │
-                     └───────────────┬─────────────────┘
-                                     │
-                       ┌─────────────▼──────────────┐
-                       │ Policy + Action execution │
-                       │ approval / caps / audit   │
-                       └─────────────┬──────────────┘
-                                     │
-                  ┌──────────────────┼─────────────────┐
-                  ▼                  ▼                 ▼
-              Telethon            SQLite             LLM
-             Telegram I/O       durable state    text/classify
+Claude Code
+    |
+    | MCP Streamable HTTP
+    | http://127.0.0.1:8765/mcp
+    v
++-------------------------------------------------+
+|                  agentTG daemon                 |
+|                                                 |
+| MCP Server ----------+                          |
+| Control Bot ---------+--> TelegramService       |
+| Telegram events -----+        |                 |
+| Skills --------------+        |                 |
+|                               +--> Policy       |
+|                               +--> LLM          |
+|                               +--> Outreach     |
+|                               +--> Audit/SQLite |
+|                               +--> Telethon     |
++--------------------------------------|----------+
+                                       v
+                                   Telegram
 ```
 
-This is a ports-and-adapters / hexagonal shape: application logic is reusable; Telegram, MCP, aiogram, scheduler and CLI are adapters.
+Important invariant: **exactly one process owns the Telethon session**.
 
-## Application services to extract
+The MCP server is embedded in the same asyncio daemon and binds to loopback. We do not start a second Telethon client for Claude Code because multiple processes sharing the same Telegram session create unnecessary locking and side-effect races.
 
-### `ChatService`
+If stdio MCP compatibility is needed later, it should be a thin local proxy to the existing daemon, not another Telegram owner.
 
-- list/get chats;
-- get recent messages;
-- change mode/trust through policy-authorized operations;
-- expose unread/recent conversation state.
+## Current layers
 
-### `MessagingService`
+### `TelegramService`
 
-- create a draft;
-- prepare an outbound action;
-- send/approve/reject through one action executor;
-- record origin and audit metadata;
-- enforce idempotency.
+Shared application service used by MCP/workflows for:
 
-### `ChannelScanService`
+- dialogs and unread chats;
+- recent messages and search;
+- chat metadata;
+- channel scans;
+- contextual reply generation;
+- explicit sends and audit logging.
 
-- list configured channels;
-- fetch recent posts;
-- apply deterministic keyword/coarse filters;
-- return compact structured posts;
-- optionally hand candidates to a semantic classifier.
+### MCP adapter
 
-### `OutreachService`
+MCP is a thin control surface over application services. It should not contain Telegram business logic.
 
-- classify candidate vacancy/lead;
-- deduplicate contacts/posts;
-- generate a personalized draft;
-- enforce per-channel/global caps;
-- execute only under the workflow's permission profile;
-- persist attempts and outcomes.
+Current categories:
 
-### `WorkflowService`
+```text
+Read/research
+  tg_status
+  tg_list_dialogs
+  tg_unread_chats
+  tg_get_messages
+  tg_search_messages
+  tg_chat_info
+  tg_generate_reply
+  tg_scan_channel
+  tg_list_configured_channels
 
-- load a named workflow/skill;
-- create a `WorkflowRun`;
-- execute bounded steps;
-- persist progress/results/errors;
-- make retries idempotent.
+Workflow/control
+  tg_list_skills
+  tg_run_skill
+  tg_pause_automation
+  tg_resume_automation
 
-## Action model
+Explicit mutation
+  tg_send_message
+  tg_mark_read
+```
 
-All write operations should converge on a durable action object rather than calling Telethon from arbitrary code.
+Bulk workflows default to dry-run. `MCP_ALLOW_WRITES=false` disables MCP/skill mutations while keeping research available.
+
+### `SkillRunner`
+
+Repeated procedures are named workflows rather than giant prompts or repeated raw tool sequences.
+
+Current examples:
+
+```text
+unread_inbox
+contact_context
+telegram_search
+channel_research
+reply_to_chat
+channel_outreach
+vacancy_hunt
+recent_activity
+```
+
+Claude-specific `.claude/skills/` files are a UX/orchestration layer. Business rules belong in agentTG workflows, not only in prompt text.
+
+### Policy and HITL
+
+Policy remains deterministic and owns:
+
+- chat mode and trust;
+- sensitive-topic gating;
+- cooldowns;
+- owner takeover pauses;
+- global pause/resume;
+- approval state;
+- outreach limits/deduplication.
+
+### SQLite
+
+SQLite is appropriate as the source of truth for the current single-user daemon.
+
+Current durable state includes chat settings, message/audit logs, pending actions, global runtime state, monitored channels and outreach deduplication.
+
+## Tool strategy
+
+Do not turn agentTG into a raw Telethon MCP wrapper.
+
+Use three levels:
+
+```text
+1. primitives
+   read/search/scan/send one explicit message
+
+2. skills/workflows
+   reply, inbox triage, outreach, vacancy hunt, follow-up
+
+3. persistent watches
+   "следи за...", schedules, conditions and long-running automation
+```
+
+The current primitive tool count is acceptable. Prefer adding a high-level workflow over adding many low-value Telegram CRUD tools.
+
+## Next architecture: durable automation
+
+The missing capability is persistence across Claude turns/sessions.
+
+Target flow:
+
+```text
+Telethon event ----\
+MCP command --------+--> EventQueue --> WorkflowRunner --> Policy --> ActionExecutor --> Telegram
+Scheduler/timer ----+
+Control bot --------+
+```
+
+### `EventQueue`
+
+Every asynchronous trigger should first become a durable event.
 
 Suggested fields:
 
 ```text
-Action
+EventQueue
 - id
-- type
-- origin: control_bot | mcp | workflow | auto_reply | cli
-- origin_run_id
-- chat_id / target
-- payload
-- status: pending | executing | executed | failed | rejected | expired
-- approval_mode
+- kind
+- source
+- payload_json
+- dedup_key
+- status: queued | running | done | failed
+- attempts
+- available_at
+- created_at / started_at / completed_at
+- last_error
+```
+
+Principles:
+
+- persist before processing;
+- replay unfinished/retryable events on startup;
+- deduplicate before side effects;
+- keep previous attempts for audit.
+
+The in-memory asyncio queue, if used, should only wake workers. SQLite remains the source of truth.
+
+### `WorkflowRun`
+
+Each workflow invocation should become inspectable state:
+
+```text
+WorkflowRun
+- id
+- workflow_name
+- origin
+- trigger_event_id
+- status
+- params_json
+- result_json
 - policy_profile
-- idempotency_key
-- created_at / executed_at
+- started_at / finished_at
 - error
 ```
 
-For network side effects, claim the action before sending and make retries explicit.
-
-## MCP interface
-
-MCP should be a thin adapter over application services, not a second implementation of Telegram logic.
-
-### Read-only tools
-
-- `tg_get_status()`
-- `tg_list_chats(mode?, limit?)`
-- `tg_get_recent_messages(chat_id, limit)`
-- `tg_list_channels()`
-- `tg_scan_channel(channel_id, limit, include_filtered=false)`
-- `tg_get_pending_actions()`
-- `tg_get_outreach_history(...)`
-
-### Draft/prepare tools
-
-- `tg_draft_reply(chat_id, instructions?)`
-- `tg_prepare_message(chat_id, text)`
-- `tg_prepare_outreach(channel_id, post_id)`
-
-These are safe defaults for an interactive external agent.
-
-### Side-effect tools
-
-- `tg_send_prepared_action(action_id)`
-- `tg_send_message(chat_id, text, idempotency_key)`
-- `tg_run_outreach(workflow_name, ...)`
-- `tg_set_chat_mode(chat_id, mode)`
-- `tg_set_trusted(chat_id, trusted)`
-- `tg_pause()` / `tg_resume()`
-
-The MCP server itself must enforce permissions. A client prompt cannot override them.
-
-## MCP transport
-
-### Same machine as Claude/Claude Code
-
-Use **stdio**. The client spawns the AgentTG MCP process. Benefits:
-
-- no listening network port;
-- no separate HTTP auth layer;
-- simple local configuration;
-- good fit for Claude Code and similar desktop/local agents.
-
-The MCP process should connect to the already-running AgentTG core through a stable application boundary. For an MVP it may import the service layer directly if process ownership is clear; a later version can use a small local IPC/API boundary.
-
-### AgentTG on a VPS
-
-Use **Streamable HTTP** behind strong authentication and preferably a private network/VPN. Do not expose a raw Telegram write surface publicly.
-
-## Workflows / skills
-
-Repeated automation should be represented as named, versioned workflow definitions rather than arbitrary cron prompts.
-
-Example:
-
-```yaml
-name: vacancy_hunt
-trigger:
-  type: interval
-  minutes: 10
-policy_profile: vacancy_outreach
-limits:
-  max_sends_per_run: 5
-  max_sends_per_day: 30
-steps:
-  - scan_channels
-  - classify_vacancies
-  - extract_contacts
-  - deduplicate
-  - generate_outreach
-  - execute_or_queue_for_approval
-```
-
-The same workflow can be started via:
+This enables:
 
 ```text
-scheduler -> vacancy_hunt
-CLI       -> agenttg skill run vacancy_hunt
-bot       -> /skill vacancy_hunt
-MCP       -> run_skill(name="vacancy_hunt")
+"что сейчас работает?"
+"почему этот workflow упал?"
+"повтори этот run"
+"покажи последние vacancy_hunt runs"
 ```
 
-The source of truth stays in AgentTG rather than being duplicated as Claude-only prompt text.
+### `WatchRule`
 
-Claude-specific skills/slash commands can still provide a convenient UX, but they should call MCP tools or `run_skill` rather than reimplement business rules.
+Natural-language persistent intent should be stored outside Claude's conversation.
 
-## Suggested initial workflows
+Examples:
 
-### `vacancy_hunt`
+```text
+"Следи за @jobs и если появится Java backend вакансия — подготовь отклик"
+"Если лид не ответил два дня — подготовь follow-up"
+"Каждое утро пришли сводку новых лидов"
+```
 
-1. fetch new configured channel posts;
-2. deterministic dedup/coarse keyword filter;
-3. structured LLM classification (`relevant`, `score`, `role`, `company`, `contact`, `reason`);
-4. policy thresholds/caps;
-5. generate personalized outreach;
-6. draft or send depending on workflow permission profile;
-7. persist result.
+Suggested model:
 
-### `inbox_triage`
+```text
+WatchRule
+- id
+- source / target
+- trigger_type: telegram_event | schedule | reply_timeout
+- condition
+- workflow_name
+- policy_profile
+- limits
+- enabled
+- cursor / last_seen_message_id
+- created_at / updated_at
+```
 
-1. collect new incoming conversations;
-2. classify intent/risk;
-3. prepare replies;
-4. AUTO only for explicitly allowed low-risk chats; otherwise create pending actions.
+Claude translates the user's instruction into a WatchRule once. The daemon then owns execution even after the Claude session ends.
 
-### `follow_up`
+## Event-driven first, scheduler second
 
-1. find sent outreach without a reply after a configured interval;
-2. check that no newer conversation invalidates the follow-up;
-3. prepare one bounded follow-up;
-4. enforce attempt count and cooldown;
-5. send or request approval.
+Telegram already gives live events through Telethon, so new-message monitoring should be event-driven:
 
-### `daily_digest`
+```text
+new Telegram message -> event -> workflow
+```
 
-Summarize new leads, replies, pending approvals, failed actions and workflow results for the owner.
+Do not poll Telegram every few minutes when a push-style event already exists.
 
-## LLM responsibilities
+Use timers/scheduler for:
 
-Use LLMs for:
+- follow-up after N hours/days;
+- daily/weekly digest;
+- retry with backoff;
+- reconciliation/catch-up;
+- external sources without push events.
 
-- semantic classification;
-- ranking/scoring;
-- concise summaries;
-- natural reply/outreach generation;
-- extracting structured facts from unstructured posts.
+The scheduler should only create an event. It must not implement a separate workflow execution path.
 
-Prefer typed/structured outputs (Pydantic/JSON schema) for machine decisions.
+## `ActionExecutor`: one side-effect path
 
-Do **not** use an LLM to decide whether it is allowed to send, bypass a cap, mark a chat trusted, or override an approval policy.
+Long term, all business-level Telegram writes should converge on a durable action object rather than arbitrary modules calling Telethon directly.
 
-## Permission profiles
+```text
+Action
+- id
+- origin
+- workflow_run_id
+- type
+- target
+- payload
+- policy_profile
+- idempotency_key
+- status: pending | executing | executed | failed | rejected
+- error
+- created_at / executed_at
+```
 
-Suggested capability levels:
+`ActionExecutor` owns:
+
+```text
+claim
+ -> policy/limits
+ -> optional approval
+ -> Telegram side effect
+ -> audit
+ -> success/failure state
+ -> explicit retry
+```
+
+This gives MCP, automatic replies, outreach and scheduled workflows the same safety semantics.
+
+## Capability profiles
+
+Target permission profiles:
 
 ```text
 READ_ONLY
@@ -261,33 +321,57 @@ ADMIN
 
 Examples:
 
-- local Claude default: READ_ONLY + DRAFT_ONLY;
-- explicitly trusted interactive session: WRITE_SCOPED;
-- `vacancy_hunt`: AUTO_WORKFLOW with channel allowlist and send caps;
-- admin operations: control bot/explicit operator only.
+- research-only Claude session -> `READ_ONLY`;
+- normal interactive Claude -> `READ_ONLY + DRAFT_ONLY`, scoped writes after explicit instruction;
+- vacancy workflow -> `AUTO_WORKFLOW` with configured channels and caps;
+- administration -> explicit operator/control surface.
 
-## Security controls
+A future improvement is to expose fewer MCP tools to read-only clients instead of merely returning a runtime write-denied error.
 
-- treat Telegram/channel text as untrusted content;
-- no raw arbitrary Telethon object/tool exposure through MCP;
-- allowlists for chats/channels/workflows where automatic writes are permitted;
-- global and per-target send caps;
-- idempotency keys for every side effect;
-- action/workflow audit with origin;
-- dry-run mode for workflows;
-- persisted retry state;
-- no credentials in Git;
-- redact secrets and sensitive message content from logs where possible.
+## What not to add yet
+
+Do not introduce these until the local SQLite design becomes insufficient:
+
+- Redis/Celery/Kafka;
+- Temporal;
+- LangGraph for simple deterministic workflows;
+- a second Telegram process just for MCP;
+- dozens of raw Telegram mutation tools;
+- autonomous LLM decisions that can bypass policy/caps.
+
+Temporal and LangGraph contain useful durability/HITL concepts, but they solve a level of complexity agentTG does not yet have.
 
 ## Recommended implementation order
 
-1. Finish hardening current runtime and state model.
-2. Extract reusable application services from aiogram/Telethon handlers.
-3. Add read-only + draft MCP tools over those services.
-4. Add controlled write MCP tools with capability profiles and idempotency.
-5. Add `WorkflowRun` + named workflow definitions and scheduler.
-6. Expose `run_skill` through MCP, control bot and CLI.
-7. Add structured LLM classifiers/evals for vacancy/reply workflows.
-8. If needed, add remote Streamable HTTP MCP for a VPS deployment.
+1. Add SQLite `EventQueue` and one worker execution path.
+2. Add `WorkflowRun`, retry/backoff, dedup and startup replay.
+3. Add `WatchRule` with Telegram-event, schedule and reply-timeout triggers.
+4. Converge remaining business writes on `ActionExecutor`.
+5. Add workflows: `inbox_triage`, `follow_up`, `daily_digest` and structured `vacancy_hunt` classification.
+6. Add MCP watch/run management tools (`tg_create_watch`, `tg_list_watches`, `tg_list_runs`, `tg_retry_run`).
+7. Later consider MCP resources, richer permission surfaces or an external durable workflow engine only if needed.
 
-The protocol is not the hard part. Reliable side effects, policy boundaries, state, idempotency, observability and safe retries are the parts worth designing carefully.
+## Mental model
+
+```text
+Claude          = planner/operator
+MCP             = control interface
+Skills          = reusable procedures
+WatchRules      = persistent intent
+EventQueue      = durable handoff
+WorkflowRunner  = orchestration
+Policy          = permission boundary
+ActionExecutor  = only business side-effect path
+Telethon        = Telegram adapter
+SQLite          = source of truth
+```
+
+The end state supports both modes without duplicating architecture:
+
+```text
+interactive:
+"посмотри / найди / напиши сейчас"
+
+autonomous:
+"следи / повторяй / сделай позже / если X — сделай Y"
+```
