@@ -8,5 +8,6 @@ Use the agentTG MCP tools to triage the owner's Telegram inbox.
 2. For ambiguous or important conversations, call `tg_get_messages` with a larger limit.
 3. Summarize each chat in Russian: who wrote, what they want, urgency, and whether a reply is needed.
 4. Do not send messages unless the user explicitly asks to reply or send.
-5. If the user asks for a reply, use `tg_generate_reply` or draft one yourself, show the intended action clearly, then use `tg_send_message` only when sending was explicitly requested.
-6. Prefer concise output and group low-priority chats together.
+5. If the user asks for a reply but did not dictate exact final text, call `tg_generate_reply` and pass the user's intent through `instructions`; do not invent the final Telegram wording yourself.
+6. If the user supplied exact final text, preserve it. Call `tg_send_message` only when sending was explicitly requested.
+7. Prefer concise output and group low-priority chats together.
