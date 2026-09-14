@@ -1,297 +1,187 @@
-# Промпты: Спецификация системы
+# Prompt system
 
-## 🎯 Обзор
+## Goal
 
-Система поддерживает **кастомные промпты** для двух сценариев:
+agentTG owns the final wording of generated Telegram messages. Claude/MCP may decide **what** should be communicated, but when the user has not dictated exact text, the internal agentTG LLM should decide **how** to phrase it using one shared persona/style stack.
 
-1. **Outreach** — мы пишем первым (из каналов)
-2. **Reply** — нам пишут (входящие сообщения)
+This keeps manual replies, inbox triage, automatic replies and outreach in one voice.
 
----
+## Prompt layers
 
-## 📁 Структура файлов
+Every generated reply is composed from these layers:
 
+```text
+system.ru.txt
+    +
+persona.ru.txt
+    +
+style.ru.txt
+    +
+safety.ru.txt
+    +
+reply/default.txt or reply/<chat_id>.txt
 ```
+
+Outreach uses the same global layers:
+
+```text
+system.ru.txt
+    +
+persona.ru.txt
+    +
+style.ru.txt
+    +
+safety.ru.txt
+    +
+outreach/default.txt or outreach/<channel_id>.txt
+```
+
+All prompt files are loaded on use, so text edits apply without restarting the daemon.
+
+## Files
+
+```text
 prompts/
-├── outreach/
-│   ├── default.txt              # Промпт по умолчанию для всех каналов
-│   ├── -1001111111.txt          # Кастомный промпт для конкретного канала
-│   └── -1002222222.txt          # Другой кастомный промпт
-│
+├── system.ru.txt          # base Telegram behavior
+├── persona.ru.txt         # facts about the account owner
+├── style.ru.txt           # shared writing voice for all outbound generation
+├── safety.ru.txt          # content-level constraints; policy still decides permission
 ├── reply/
-│   ├── default.txt              # Промпт по умолчанию для всех чатов
-│   ├── 8465750445.txt           # Кастомный промпт для конкретного чата
-│   └── 1234567890.txt           # Другой кастомный промпт
-│
-└── system.ru.txt                # (legacy) старый системный промпт
+│   ├── default.txt
+│   └── <chat_id>.txt
+└── outreach/
+    ├── default.txt
+    └── <channel_id>.txt
 ```
 
----
+### `persona.ru.txt`
 
-## 🔧 Логика выбора промпта
+Contains stable facts the model may use about the owner. Do not put speculative skills, current commitments or sensitive credentials here.
 
-### 1. Outreach (мы пишем первым)
+### `style.ru.txt`
 
-```
-Пост в канале {channel_id}
-    ↓
-Ищем файл: prompts/outreach/{channel_id}.txt
-    ↓ (нашли)
-Используем этот промпт
+The shared Telegram voice. Current rules intentionally prefer short, phone-like copy and discourage AI/corporate markers such as:
 
-    ↓ (не нашли)
-Fallback: prompts/outreach/default.txt
-```
+- long typographic dashes;
+- unnecessary parentheses;
+- exhaustive technology lists;
+- symmetrical cover-letter structure;
+- phrases such as `готов обсудить детали` when they add no value;
+- repeating the other person's message or vacancy back to them.
 
-**Пример:**
-| Канал | Файл | Промпт |
-|-------|------|--------|
-| `-1001782596777` (вакансии) | `prompts/outreach/-1001782596777.txt` | "Ищешь работу, фронтендер..." |
-| `-1002009325857` (менторы) | `prompts/outreach/-1002009325857.txt` | "Предлагаешь менторство..." |
-| `-1009999999999` (без файла) | `prompts/outreach/default.txt` | Дефолтный промпт |
+The code also mechanically replaces `—` and `–` with a normal `-` before generated copy is sent. Parentheses are not mechanically removed because that can change meaning; they are handled at the prompt/style level.
 
----
+### `safety.ru.txt`
 
-### 2. Reply (нам пишут)
+Controls content generation only: do not invent facts, dates, money, commitments, private information, etc. It must not decide whether sending is allowed. Permission remains in deterministic policy/MCP/workflow code.
 
-```
-Входящее сообщение от {chat_id}
-    ↓
-Ищем файл: prompts/reply/{chat_id}.txt
-    ↓ (нашли)
-Используем этот промпт
+## Reply generation
 
-    ↓ (не нашли)
-Fallback: prompts/reply/default.txt
+`tg_generate_reply` reads the latest incoming message plus recent conversation context and runs the internal agentTG model.
+
+It also accepts optional owner instructions:
+
+```text
+tg_generate_reply(
+  chat="@alice",
+  instructions="скажи что завтра после шести удобно"
+)
 ```
 
-**Пример:**
-| Чат | Файл | Промпт |
-|-----|------|--------|
-| `8465750445` (рекрутер) | `prompts/reply/8465750445.txt` | "Отвечай формально, по делу..." |
-| `1234567890` (друг) | `prompts/reply/1234567890.txt` | "Отвечай неформально, с юмором..." |
-| `9999999999` (без файла) | `prompts/reply/default.txt` | Дефолтный промпт |
+The instruction describes intent, not final copy. agentTG combines it with conversation context, persona, style and safety, then returns a draft.
 
----
+Recommended division of responsibility:
 
-## ✍️ Как настроить
-
-### Для канала (outreach)
-
-1. Узнать ID канала:
-   ```
-   /channels  # в контрольном боте
-   ```
-
-2. Создать файл с промптом:
-   ```bash
-   nano prompts/outreach/-1001782596777.txt
-   ```
-
-3. Написать текст промпта:
-   ```
-   Ты — опытный фронтенд-разработчик с 5 годами опыта.
-   Ищешь новую работу. Пиши коротко, по делу.
-   Упомяни конкретные технологии из вакансии.
-   ```
-
-4. Изменения подхватываются при следующем запросе, перезапуск не требуется:
-   ```bash
-   ./start.sh
-   ```
-
-### Для чата (reply)
-
-1. Узнать ID чата:
-   ```
-   /status  # в контрольном боте (см. recent actions)
-   # или посмотреть в БД
-   ```
-
-2. Создать файл с промптом:
-   ```bash
-   nano prompts/reply/8465750445.txt
-   ```
-
-3. Написать текст промпта:
-   ```
-   Отвечай вежливо, но сдержанно.
-   Ты занят проектом, поэтому отвечай кратко.
-   ```
-
-4. Изменения подхватываются при следующем входящем сообщении, перезапуск не требуется:
-   ```bash
-   ./start.sh
-   ```
-
-### Вернуть дефолтный
-
-Просто удали кастомный файл:
-```bash
-rm prompts/outreach/-1001782596777.txt
-# Теперь будет использоваться default.txt
+```text
+Claude / external agent
+    understand context
+    decide intent
+    pass instructions
+          |
+          v
+agentTG internal LLM
+    produce final Telegram wording
+          |
+          v
+style sanitizer
+          |
+          v
+send only if explicitly authorized
 ```
 
----
+If the owner provides exact final text, for example `напиши: "Да, завтра после шести удобно"`, the MCP client should preserve that text instead of rewriting it through the internal model.
 
-## 🎯 Сценарии использования
+## Reply-specific overrides
 
-### Сценарий 1: Разные каналы — разные промпты
+Resolution:
 
-```bash
-# Канал вакансий — ищешь работу
-prompts/outreach/-1001782596777.txt
-"Ты фронтенд-разработчик с 5 годами опыта, ищешь новую работу..."
-
-# Канал менторства — предлагаешь услуги
-prompts/outreach/-1002009325857.txt
-"Ты опытный разработчик, предлагаешь менторство за 5000р/месяц..."
-
-# Канал нетворкинга — просто знакомства
-prompts/outreach/-1003333333.txt
-"Ты открыт к предложениям, хочешь расширить круг знакомств..."
-```
-
-### Сценарий 2: Временно меняешь стиль ответов
-
-```bash
-# Обычный режим
+```text
+prompts/reply/<chat_id>.txt
+        |
+        | missing / empty
+        v
 prompts/reply/default.txt
-"Отвечай дружелюбно, развёрнуто..."
-
-# Уехал в отпуск (временно заменил файл)
-prompts/reply/default.txt
-"Отвечай, что я в отпуске до 15 июля, вернусь на связи после..."
-
-# Вернулся (вернул старый текст)
-prompts/reply/default.txt
-"Отвечай дружелюбно, развёрнуто..."
+        |
+        | missing / empty
+        v
+hardcoded safe fallback
 ```
 
-### Сценарий 3: Особый промпт для важного контакта
+Chat-specific files should contain only behavior that differs for that contact, for example formality or relationship context. Do not duplicate the entire global style prompt there.
 
-```bash
-# Для рекрутера из FAANG
-prompts/reply/8465750445.txt
-"Отвечай формально, подчёркивай интерес к позиции..."
+## Outreach-specific overrides
 
-# Для друга
-prompts/reply/1234567890.txt
-"Отвечай неформально, можно с шутками..."
+Resolution:
 
-# Все остальные
-prompts/reply/default.txt
-"Отвечай нейтрально..."
+```text
+prompts/outreach/<channel_id>.txt
+        |
+        | missing / empty
+        v
+prompts/outreach/default.txt
+        |
+        | missing / empty
+        v
+hardcoded safe fallback
 ```
 
----
+Outreach prompts describe the business purpose of the first message. Shared voice still comes from `style.ru.txt`.
 
-## 🏗️ Архитектура (для разработчиков)
+The current default outreach behavior is intentionally compact:
 
-### Компоненты
+- mention one relevant vacancy detail;
+- use only relevant facts from persona;
+- ask whether the position is still relevant or whether a resume can be sent;
+- do not repeat the full vacancy or full tech stack;
+- do not automatically propose a call;
+- avoid formal cover-letter language.
 
-| Компонент | Файл | Ответственность |
-|-----------|------|-----------------|
-| Outreach Prompt Loader | `userbot/channel_handler.py` | Загрузка промпта для канала |
-| Reply Prompt Loader | `agent/prompts.py` | Загрузка промпта для чата |
-| Prompt Resolver | `agent/prompts.py` | Логика fallback (custom → default) |
+## Claude Code behavior
 
-### Алгоритм (псевдокод)
+Project skills under `.claude/skills/` instruct Claude to use agentTG as the default Telegram copywriter.
 
-```python
-def get_outreach_prompt(channel_id: int) -> str:
-    custom_path = f"prompts/outreach/{channel_id}.txt"
-    default_path = "prompts/outreach/default.txt"
+For a request like:
 
-    if Path(custom_path).exists():
-        return Path(custom_path).read_text()
-    return Path(default_path).read_text()
-
-
-def get_reply_prompt(chat_id: int) -> str:
-    custom_path = f"prompts/reply/{chat_id}.txt"
-    default_path = "prompts/reply/default.txt"
-
-    if Path(custom_path).exists():
-        return Path(custom_path).read_text()
-    return Path(default_path).read_text()
+```text
+Ответь ей, что завтра после шести удобно
 ```
 
----
+preferred flow:
 
-## 📝 Требования к промптам
-
-### Формат
-- **Кодировка:** UTF-8
-- **Расширение:** `.txt`
-- **Имя файла:** `{channel_id}.txt` или `{chat_id}.txt` (целое число)
-- **Содержимое:** Любой текст на любом языке
-
-### Рекомендации
-- **Краткость:** 50-500 символов (оптимально для LLM)
-- **Конкретика:** Указывай роль, тон, длину ответа
-- **Контекст:** Добавляй детали (опыт, технологии, цели)
-
-### Пример хорошего промпта
-```
-Ты — фронтенд-разработчик с 5 годами опыта (React, TypeScript, Node.js).
-Ищешь новую работу. Пиши коротко (2-3 предложения), дружелюбно.
-Упомяни конкретную технологию из вакансии. Спроси, актуальна ли позиция.
+```text
+tg_get_messages (if more context is needed)
+        ->
+tg_generate_reply(
+  instructions="скажи что завтра после шести удобно"
+)
+        ->
+tg_send_message (only if the user asked to actually send)
 ```
 
-### Пример плохого промпта
-```
-Ответь на это сообщение.
-```
-(Слишком общее, нет контекста, роли, тона)
+Claude should not independently rewrite the final Telegram copy unless the owner explicitly asks Claude itself for an alternative wording.
 
----
+## Design rule
 
-## 🔮 Future Extensions (не в MVP)
+**Intent may come from Claude. Voice belongs to agentTG. Permission belongs to deterministic code.**
 
-### 1. Команды бота
-```
-/set_outreach_prompt <channel_id> <prompt_name>
-/set_reply_prompt <chat_id> <prompt_name>
-/list_prompts
-```
-
-### 2. Пресеты промптов
-```
-prompts/
-├── presets/
-│   ├── job_seek.txt
-│   ├── mentorship.txt
-│   ├── freelance.txt
-│   └── networking.txt
-```
-
-### 3. Переменные в промптах
-```
-Ты — {role} с {experience} годами опыта.
-Ищешь {goal}. Упомяни {technologies} из вакансии.
-```
-
-### 4. БД для маппинга
-```sql
-CREATE TABLE prompt_assignments (
-    entity_type TEXT,  -- 'channel' или 'chat'
-    entity_id INTEGER,
-    prompt_name TEXT
-);
-```
-
----
-
-## 📚 Связанные документы
-
-- `README.md` — общая документация проекта
-- `prompts/system.ru.txt` — текущий системный промпт (legacy)
-- `src/tg_agent/agent/prompts.py` — загрузка промптов
-- `src/tg_agent/userbot/channel_handler.py` — outreach логика
-
----
-
-**Версия:** 1.0
-**Дата:** 2026-07-09
-**Статус:** Spec для реализации
+That separation lets us improve one writing style once and have it apply to interactive MCP replies, automatic replies, outreach and future workflows.
