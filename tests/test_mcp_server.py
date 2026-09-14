@@ -71,6 +71,29 @@ async def test_mcp_read_tool_calls_service_through_protocol():
 
 
 @pytest.mark.asyncio
+async def test_mcp_generate_reply_passes_owner_intent():
+    server, telegram, _ = make_server()
+
+    async with Client(server, raise_exceptions=True) as client:
+        result = await client.call_tool(
+            "tg_generate_reply",
+            {
+                "chat": "@alice",
+                "context_limit": 8,
+                "instructions": "скажи что завтра после шести удобно",
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["ok"] is True
+    telegram.generate_reply.assert_awaited_once_with(
+        chat="@alice",
+        context_limit=8,
+        instructions="скажи что завтра после шести удобно",
+    )
+
+
+@pytest.mark.asyncio
 async def test_mcp_write_kill_switch_blocks_send():
     server, telegram, _ = make_server(allow_writes=False)
 
