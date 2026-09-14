@@ -92,7 +92,7 @@ def test_extract_contacts_deduplicates_and_normalizes():
 
 
 @pytest.mark.asyncio
-async def test_generate_reply_uses_latest_incoming_and_older_context():
+async def test_generate_reply_uses_latest_incoming_context_and_owner_instructions():
     client = MagicMock()
     incoming = SimpleNamespace(
         id=30,
@@ -128,13 +128,18 @@ async def test_generate_reply_uses_latest_incoming_and_older_context():
         )
     )
 
-    result = await service.generate_reply(chat="@alice", context_limit=10)
+    result = await service.generate_reply(
+        chat="@alice",
+        context_limit=10,
+        instructions="скажи что после шести удобно",
+    )
 
     assert result["ok"] is True
     assert result["reply_to_message_id"] == 30
     call = service.reply_generator.generate.await_args
     assert call.kwargs["incoming_message"] is incoming
     assert call.kwargs["context_messages"] == [older_incoming]
+    assert call.kwargs["instructions"] == "скажи что после шести удобно"
 
 
 @pytest.mark.asyncio
