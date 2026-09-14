@@ -67,7 +67,7 @@ Verify the connection with Claude Code's MCP status/list command.
 | `tg_get_messages` | Recent messages from a chat/person/channel |
 | `tg_search_messages` | Global or chat-scoped Telegram search |
 | `tg_chat_info` | Resolve username/link/ID to peer metadata |
-| `tg_generate_reply` | Generate a contextual reply without sending |
+| `tg_generate_reply` | Generate a styled contextual reply without sending; accepts optional owner `instructions` |
 | `tg_scan_channel` | Read/filter recent channel posts |
 | `tg_list_configured_channels` | Monitored channels and outreach policy |
 | `tg_list_skills` | Discover reusable workflows |
@@ -80,9 +80,45 @@ Verify the connection with Claude Code's MCP status/list command.
 | `tg_mark_read` | Mark a chat as read |
 | `tg_run_skill` | Run a named workflow; sending workflows default to dry-run |
 | `tg_pause_automation` | Pause automatic event processing/outreach |
-| `tg_resume_automation` | Resume automatic event processing/outreach |
+| `tg_resume_automation` | Resume automatic processing |
 
 Direct MCP reads remain available while automatic processing is paused. This lets Claude research Telegram without silently re-enabling auto-replies.
+
+## Who writes the final Telegram text?
+
+For generated replies, **agentTG should be the default copywriter**. Claude decides the intent and passes it to `tg_generate_reply`; agentTG combines conversation context, persona, shared style and safety prompts.
+
+Example:
+
+```text
+User: Ответь ей, что завтра после шести удобно
+
+Claude:
+  tg_generate_reply(
+    chat="@username",
+    instructions="скажи что завтра после шести удобно"
+  )
+       -> agentTG internal LLM creates final wording
+       -> tg_send_message only because the user asked to actually reply
+```
+
+If the user provides exact final text, for example:
+
+```text
+Напиши ей: "Да, завтра после шести удобно"
+```
+
+Claude should preserve that text rather than sending it through generation again.
+
+Generated copy shares `prompts/style.ru.txt`. It deliberately prefers short Telegram-like text, avoids long typographic dashes, unnecessary parentheses, exhaustive skill lists and generic cover-letter phrases. A mechanical sanitizer additionally replaces `—` and `–` with a normal `-` before generated copy is sent.
+
+This keeps the division clear:
+
+```text
+Claude = understand context + decide intent
+agentTG LLM = final wording
+policy/MCP = permission to send
+```
 
 ## Internal named skills
 
@@ -94,7 +130,7 @@ Call them through `tg_run_skill(name=..., params=...)`.
 | `contact_context` | Resolve one person/chat and return history |
 | `telegram_search` | Search messages |
 | `channel_research` | Read a channel and extract Telegram contacts |
-| `reply_to_chat` | Generate a reply; `send=false` by default |
+| `reply_to_chat` | Generate a styled reply; accepts `instructions`; `send=false` by default |
 | `channel_outreach` | Scan/extract contacts; `send=false` by default |
 | `vacancy_hunt` | Research all configured vacancy channels; `send=false` by default |
 | `recent_activity` | Read recent audited agent actions |
@@ -107,7 +143,7 @@ The repository also contains Claude Code skills under `.claude/skills/`:
 
 - `/tg-inbox` — triage unread conversations.
 - `/tg-research` — read-only Telegram research.
-- `/tg-reply` — inspect one conversation and draft/send a reply.
+- `/tg-reply` — inspect one conversation and draft/send through the agentTG style layer.
 - `/tg-outreach` — controlled channel outreach; manual invocation only.
 - `/tg-vacancy-hunt` — research configured vacancy channels and optionally outreach; manual invocation only.
 
@@ -134,7 +170,11 @@ Once agentTG and MCP are running, these are intended to work as normal Claude re
 ```
 
 ```text
-Напиши @username: "Да, завтра после шести удобно".
+Ответь @username, что завтра после шести удобно.
+```
+
+```text
+Напиши @username точный текст: "Да, завтра после шести удобно".
 ```
 
 ```text
