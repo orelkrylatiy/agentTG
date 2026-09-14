@@ -27,7 +27,10 @@ def create_mcp_server(
         "agentTG",
         instructions=(
             "Telegram tools for the account owner. Prefer read tools first. "
+            "When the user asks you to reply or convey an intent but did not dictate exact final text, "
+            "prefer tg_generate_reply with instructions so agentTG applies the configured persona/style. "
             "Use tg_send_message only when the user explicitly asks to send. "
+            "If the user supplied exact message text, send that text without rewriting it. "
             "Channel outreach is dry-run unless send=true is explicitly requested."
         ),
     )
@@ -107,16 +110,22 @@ def create_mcp_server(
     @mcp.tool(
         name="tg_generate_reply",
         description=(
-            "Generate a contextual draft reply to the latest incoming text message "
-            "in a chat. This tool does not send anything."
+            "Generate a contextual draft reply to the latest incoming text message in a chat. "
+            "Optional instructions describe the owner's intent (for example, 'say tomorrow after six works'). "
+            "agentTG applies its configured persona/style. This tool does not send anything."
         ),
         annotations=read_only,
     )
     async def tg_generate_reply(
         chat: str,
         context_limit: int = 12,
+        instructions: str | None = None,
     ) -> dict[str, Any]:
-        return await telegram.generate_reply(chat=chat, context_limit=context_limit)
+        return await telegram.generate_reply(
+            chat=chat,
+            context_limit=context_limit,
+            instructions=instructions,
+        )
 
     @mcp.tool(
         name="tg_scan_channel",
