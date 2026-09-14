@@ -83,13 +83,25 @@ async def test_channel_outreach_defaults_to_dry_run():
 
 
 @pytest.mark.asyncio
-async def test_reply_skill_does_not_send_when_send_false():
+async def test_reply_skill_passes_owner_instructions_and_does_not_send_when_send_false():
     runner, telegram = make_runner()
 
-    result = await runner.run("reply_to_chat", {"chat": "@alice", "send": False})
+    result = await runner.run(
+        "reply_to_chat",
+        {
+            "chat": "@alice",
+            "instructions": "скажи что завтра после шести удобно",
+            "send": False,
+        },
+    )
 
     assert result["ok"] is True
     assert result["sent"] is False
+    telegram.generate_reply.assert_awaited_once_with(
+        "@alice",
+        context_limit=12,
+        instructions="скажи что завтра после шести удобно",
+    )
     telegram.send_message.assert_not_awaited()
 
 
