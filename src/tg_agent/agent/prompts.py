@@ -42,6 +42,15 @@ class PromptManager:
         return prompt or "Отвечай кратко и естественно, как в обычной переписке в Telegram."
 
     @property
+    def style_prompt(self) -> str:
+        """Shared Telegram voice applied to every generated outbound message."""
+        prompt = self._load_prompt_file("style.ru.txt")
+        return prompt or (
+            "Пиши естественно и коротко, как человек в Telegram. "
+            "Не используй длинные тире и по возможности избегай скобок и канцеляризмов."
+        )
+
+    @property
     def safety_prompt(self) -> str:
         """Reload on every use, matching system/persona hot-reload semantics."""
         prompt = self._load_prompt_file("safety.ru.txt")
@@ -62,6 +71,8 @@ class PromptManager:
         parts = [self.system_prompt]
         if persona := self.persona:
             parts.append(persona)
+        if style := self.style_prompt:
+            parts.append(style)
         if safety := self.safety_prompt:
             parts.append(safety)
         return "\n\n".join(parts)
@@ -71,6 +82,13 @@ class PromptManager:
         parts = [self.get_full_system_prompt()]
         if reply_prompt := self.get_reply_prompt(chat_id):
             parts.append(reply_prompt)
+        return "\n\n".join(parts)
+
+    def get_outreach_system_prompt(self, channel_id: int) -> str:
+        """Compose shared persona/style/safety with channel-specific outreach behavior."""
+        parts = [self.get_full_system_prompt()]
+        if outreach_prompt := self.get_outreach_prompt(channel_id):
+            parts.append(outreach_prompt)
         return "\n\n".join(parts)
 
     def format_context_messages(
@@ -119,9 +137,11 @@ class PromptManager:
         if content := self._load_custom_prompt(default_path, "default outreach prompt"):
             return content
 
-        return """Ты — фронтенд-разработчик с 5 годами опыта, ищешь новую работу.
-Напиши короткое сообщение (2-3 предложения) рекрутеру.
-Упомяни деталь из вакансии, скажи что готов скинуть резюме, спроси актуальна ли позиция."""
+        return """Ты пишешь первое сообщение рекрутеру или работодателю по вакансии.
+Сделай короткое живое сообщение в Telegram, обычно 2-4 коротких предложения.
+Упомяни одну реально важную деталь из вакансии, коротко представь релевантный опыт владельца и спроси, актуальна ли позиция или можно ли прислать резюме.
+Не пересказывай вакансию, не перечисляй весь стек, не добавляй длинные тире, скобки и формальные фразы вроде «готов обсудить детали».
+Используй только факты из persona и текста вакансии. Только готовый текст сообщения."""
 
     def get_reply_prompt(self, chat_id: int) -> str:
         custom_path = self.reply_prompts_dir / f"{chat_id}.txt"
@@ -135,9 +155,9 @@ class PromptManager:
         if content := self._load_custom_prompt(default_path, "default reply prompt"):
             return content
 
-        return """Ты отвечаешь в Telegram от имени Максима — живого человека.
-Пиши кратко (1-2 фразы), по-русски, неформально.
-Без markdown, без приветствий если диалог уже идёт."""
+        return """Ты отвечаешь в Telegram от имени Максима - живого человека.
+Пиши кратко, по-русски и естественно.
+Без markdown и без приветствия, если диалог уже идёт."""
 
     def _load_custom_prompt(self, path: Path, label: str) -> str:
         if not path.exists():
