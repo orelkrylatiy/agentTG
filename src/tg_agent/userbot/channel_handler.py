@@ -10,6 +10,7 @@ from telethon import TelegramClient, events
 
 from tg_agent.agent.llm import LLMClient
 from tg_agent.agent.prompts import PromptManager
+from tg_agent.agent.sanitizer import normalize_telegram_style
 from tg_agent.config import Settings
 from tg_agent.control_bot import ControlBot
 from tg_agent.logging import get_logger
@@ -137,7 +138,7 @@ class ChannelHandler:
         if self.llm_client is None:
             return []
 
-        system_prompt = self.prompt_manager.get_outreach_prompt(channel_id)
+        system_prompt = self.prompt_manager.get_outreach_system_prompt(channel_id)
         hour_ago = datetime.utcnow() - timedelta(hours=1)
         sent_usernames: list[str] = []
 
@@ -177,7 +178,8 @@ class ChannelHandler:
                 system_prompt=system_prompt,
             )
 
-            if not resp.success or not resp.content:
+            outreach_text = normalize_telegram_style(resp.content or "")
+            if not resp.success or not outreach_text:
                 error = resp.error_message or "empty LLM response"
                 with self.db.get_sync_session() as session:
                     OutreachContactRepo(session).mark_failed(username, error)
@@ -185,7 +187,7 @@ class ChannelHandler:
                 continue
 
             try:
-                sent_message = await self.client.send_message(username, resp.content)
+                sent_message = await self.client.send_message(username, outreach_text)
                 chat_id = sent_message.chat_id
 
                 with self.db.get_sync_session() as session:
@@ -198,7 +200,7 @@ class ChannelHandler:
                         message_id=sent_message.id,
                         sender_id=self.settings.owner_telegram_id,
                         direction=MessageDirection.AGENT_SENT,
-                        text=resp.content,
+                        text=outreach_text,
                     )
 
                     chat_repo = ChatSettingsRepo(session)
