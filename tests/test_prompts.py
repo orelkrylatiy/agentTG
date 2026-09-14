@@ -20,12 +20,26 @@ def test_reply_system_prompt_preserves_global_layers_and_adds_chat_prompt(tmp_pa
     manager = _make_manager(tmp_path)
     (tmp_path / "system.ru.txt").write_text("system", encoding="utf-8")
     (tmp_path / "persona.ru.txt").write_text("persona", encoding="utf-8")
+    (tmp_path / "style.ru.txt").write_text("style", encoding="utf-8")
     (tmp_path / "safety.ru.txt").write_text("safety", encoding="utf-8")
     (tmp_path / "reply" / "123.txt").write_text("custom reply", encoding="utf-8")
 
     prompt = manager.get_reply_system_prompt(123)
 
-    assert prompt == "system\n\npersona\n\nsafety\n\ncustom reply"
+    assert prompt == "system\n\npersona\n\nstyle\n\nsafety\n\ncustom reply"
+
+
+def test_outreach_system_prompt_uses_same_global_style_layers(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    (tmp_path / "system.ru.txt").write_text("system", encoding="utf-8")
+    (tmp_path / "persona.ru.txt").write_text("persona", encoding="utf-8")
+    (tmp_path / "style.ru.txt").write_text("style", encoding="utf-8")
+    (tmp_path / "safety.ru.txt").write_text("safety", encoding="utf-8")
+    (tmp_path / "outreach" / "default.txt").write_text("outreach", encoding="utf-8")
+
+    prompt = manager.get_outreach_system_prompt(-100123)
+
+    assert prompt == "system\n\npersona\n\nstyle\n\nsafety\n\noutreach"
 
 
 def test_empty_custom_reply_prompt_falls_back_to_default(tmp_path: Path) -> None:
@@ -42,7 +56,8 @@ def test_empty_default_outreach_prompt_falls_back_to_hardcoded_prompt(tmp_path: 
 
     prompt = manager.get_outreach_prompt(-100123)
 
-    assert "фронтенд-разработчик с 5 годами опыта" in prompt
+    assert "первое сообщение рекрутеру" in prompt
+    assert "длинные тире" in prompt
 
 
 def test_channel_handler_creates_prompt_manager_when_omitted() -> None:
