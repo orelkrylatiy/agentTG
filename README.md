@@ -9,7 +9,7 @@ agentTG keeps one authorized Telethon user session running and exposes controlle
 - MCP tools for Claude Code and other MCP clients
 - reusable named skills/workflows for repeated research, replies and outreach
 
-The LLM decides what text to generate. Deterministic Python policy, persisted state and explicit workflow rules decide what is processed and what can be sent.
+For generated Telegram copy, external agents such as Claude should normally decide **intent**, while the internal agentTG LLM owns **final wording** through the shared persona/style prompt stack. Deterministic Python policy, persisted state and explicit workflow rules decide what is processed and what can be sent.
 
 ## Architecture
 
@@ -41,7 +41,7 @@ One process owns the Telethon session. MCP is embedded into that same asyncio da
 - Inspect conversation history and peer metadata
 - Search Telegram messages globally or inside a chat
 - Research channels and filter recent posts
-- Generate contextual replies with the configured persona/prompts
+- Generate contextual replies with owner intent + configured persona/style
 - Send an explicitly requested message with audit logging
 - Monitor configured channels and extract `@username` / `t.me/...` contacts
 - Durable outreach deduplication and rate limiting in SQLite
@@ -135,7 +135,7 @@ For the complete MCP/tool/skill reference and natural-language examples, see [`d
 | `tg_get_messages` | Read chat/person/channel history |
 | `tg_search_messages` | Global or chat-scoped Telegram search |
 | `tg_chat_info` | Resolve username/link/ID |
-| `tg_generate_reply` | Generate a draft without sending |
+| `tg_generate_reply` | Generate a styled draft without sending; optional `instructions` describe owner intent |
 | `tg_scan_channel` | Read/filter recent channel posts |
 | `tg_list_configured_channels` | Inspect monitored-channel policy |
 | `tg_list_skills` | Discover named workflows |
@@ -152,6 +152,25 @@ For the complete MCP/tool/skill reference and natural-language examples, see [`d
 
 Set `MCP_ALLOW_WRITES=false` to disable direct MCP sends/mark-read and mutating workflow actions while keeping research available.
 
+### Reply wording
+
+When the owner asks something like:
+
+```text
+Ответь ей, что завтра после шести удобно
+```
+
+Claude should pass that intent to:
+
+```text
+tg_generate_reply(
+  chat="@username",
+  instructions="скажи что завтра после шести удобно"
+)
+```
+
+agentTG then creates the final text using conversation context, `persona.ru.txt`, `style.ru.txt` and safety rules. If the owner provides exact final text, Claude should preserve it instead of rewriting it.
+
 ## Named workflows
 
 Internal workflows are invoked through `tg_run_skill`:
@@ -162,7 +181,7 @@ Internal workflows are invoked through `tg_run_skill`:
 | `contact_context` | Metadata + history for one contact/chat |
 | `telegram_search` | Search messages |
 | `channel_research` | Read channel posts and extract contacts |
-| `reply_to_chat` | Generate a contextual reply; optional explicit send |
+| `reply_to_chat` | Generate a contextual styled reply with optional owner `instructions`; optional explicit send |
 | `channel_outreach` | Research/extract contacts; send only with `send=true` |
 | `vacancy_hunt` | Research all configured channels; send only with `send=true` |
 | `recent_activity` | Recent audited agent activity |
@@ -198,7 +217,11 @@ The bulk/send-oriented Claude skills are marked manual-only so they are not auto
 ```
 
 ```text
-Напиши @username: "Да, завтра после шести удобно".
+Ответь @username, что завтра после шести удобно.
+```
+
+```text
+Напиши @username точный текст: "Да, завтра после шести удобно".
 ```
 
 ```text
@@ -266,7 +289,7 @@ new channel post
        -> extract contacts
        -> SQLite dedup claim
        -> per-channel hourly limit
-       -> LLM outreach draft
+       -> internal LLM + shared style outreach draft
        -> Telegram send
        -> audit + sent state
 ```
@@ -305,6 +328,7 @@ OAuth/runtime credentials belong only under ignored local `data/` paths. Never c
 ```text
 prompts/system.ru.txt
 prompts/persona.ru.txt
+prompts/style.ru.txt
 prompts/safety.ru.txt
 prompts/reply/default.txt
 prompts/reply/<chat_id>.txt
@@ -312,7 +336,7 @@ prompts/outreach/default.txt
 prompts/outreach/<channel_id>.txt
 ```
 
-Prompt layers are resolved dynamically. Specific chat/channel prompt files override their respective defaults.
+Prompt layers are resolved dynamically. Specific chat/channel prompt files override their respective defaults while the shared persona/style/safety layers remain active. See [`prompts/PROMPTS_SPEC.md`](prompts/PROMPTS_SPEC.md).
 
 ## State and safety
 
@@ -376,8 +400,11 @@ agentTG/
 ├── .mcp.json                # project MCP connection for Claude Code
 ├── docs/
 │   ├── AGENT_PLATFORM_ARCHITECTURE.md
-│   └── MCP.md
+│   ├── MCP.md
+│   └── RESEARCH_AGENT_AUTOMATION_PATTERNS.md
 ├── prompts/
+│   ├── PROMPTS_SPEC.md
+│   └── style.ru.txt
 ├── src/tg_agent/
 │   ├── agent/               # LLM, prompts, reply generation
 │   ├── control_bot/         # aiogram owner controls + HITL
