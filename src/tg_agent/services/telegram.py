@@ -221,6 +221,7 @@ class TelegramService:
         self,
         chat: str | int,
         context_limit: int | None = None,
+        instructions: str | None = None,
     ) -> dict[str, Any]:
         target = normalize_target(chat)
         limit = context_limit or self.settings.max_context_messages
@@ -249,6 +250,7 @@ class TelegramService:
         generated = await self.reply_generator.generate(
             incoming_message=incoming,
             context_messages=context,
+            instructions=instructions,
         )
         return {
             "ok": generated.success,
