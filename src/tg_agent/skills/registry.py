@@ -63,9 +63,14 @@ class SkillRunner:
             ),
             "reply_to_chat": SkillSpec(
                 name="reply_to_chat",
-                description="Generate a contextual reply; optionally send it.",
+                description=(
+                    "Generate a contextual reply using agentTG persona/style and optional owner "
+                    "instructions; optionally send it."
+                ),
                 mutates=True,
-                examples=("reply_to_chat chat=@name send=false",),
+                examples=(
+                    "reply_to_chat chat=@name instructions='скажи что завтра после шести удобно' send=false",
+                ),
             ),
             "channel_outreach": SkillSpec(
                 name="channel_outreach",
@@ -167,9 +172,11 @@ class SkillRunner:
 
     async def _reply_to_chat(self, params: dict[str, Any]) -> dict[str, Any]:
         chat = self._required(params, "chat")
+        instructions = params.get("instructions")
         generated = await self.telegram.generate_reply(
             chat,
             context_limit=int(params.get("context_limit", 12)),
+            instructions=str(instructions) if instructions is not None else None,
         )
         if not generated.get("ok") or not bool(params.get("send", False)):
             return {"ok": bool(generated.get("ok")), "draft": generated, "sent": False}
