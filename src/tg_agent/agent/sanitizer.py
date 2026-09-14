@@ -38,6 +38,17 @@ _ASSISTANT_ALREADY_ASKED_RE = re.compile(
 )
 
 
+def normalize_telegram_style(text: str) -> str:
+    """Apply safe mechanical style normalization to generated outbound copy."""
+    text = text.strip()
+    # Models frequently use typographic dashes even when asked not to. Replacing the
+    # glyph is safe both for punctuation ("A — B") and compounds ("fullstack–dev").
+    text = text.replace("—", "-").replace("–", "-")
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r' *\n *', '\n', text)
+    return text.strip()
+
+
 def _agent_already_asked(context_turns: list[dict]) -> bool:
     """Return True if the most recent assistant turn already ended with a question."""
     for turn in reversed(context_turns):
@@ -52,7 +63,7 @@ def clean_reply(
     last_user_text: str,
     context_turns: list[dict] | None = None,
 ) -> str:
-    text = text.strip()
+    text = normalize_telegram_style(text)
 
     # Always strip greetings from start — LLM tends to add them even with system prompt
     text = _GREETING_RE.sub('', text).strip()
@@ -70,4 +81,4 @@ def clean_reply(
         text = _FOLLOW_UP_RE.sub('', text).strip()
         text = re.sub(r'\s+', ' ', text).strip()
 
-    return text
+    return normalize_telegram_style(text)
